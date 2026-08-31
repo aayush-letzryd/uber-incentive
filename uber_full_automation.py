@@ -887,6 +887,7 @@ def main():
 
         context = pw.chromium.launch_persistent_context(**launch_kwargs)
 
+        try:
             def on_context_download(download):
                 dest = OUT_DIR / download.suggested_filename
                 try:
