@@ -14,10 +14,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
 import os
 import re
 import time
+import random
 import json
 import glob
 import shutil
 import datetime
+import requests
 import pandas as pd
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, BrowserContext
@@ -191,6 +193,175 @@ def save_cached_org_uuid(code: str, uuid: str):
         Log.warn(f"Note saving org UUID: {e}")
 
 
+UBER_EMAIL = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
+UBER_PASSWORD = os.getenv("UBER_PASSWORD", "Letzuberp123")
+SHEET_ID = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+
+
+def get_current_sheet_state():
+    try:
+        res = requests.get(SHEET_CSV_URL, timeout=10)
+        if res.status_code == 200:
+            df = pd.read_csv(io.StringIO(res.text))
+            if not df.empty:
+                first_msg = str(df.iloc[0, 0])
+                first_date = str(df.iloc[0, 2]) if df.shape[1] >= 3 else ""
+                match = re.search(r'\b(\d{4})\b', first_msg)
+                code = match.group(1) if match else None
+                return code, first_date, first_msg
+    except Exception as e:
+        Log.warn(f"Sheet fetch note: {e}")
+    return None, None, ""
+
+
+def poll_for_new_otp(initial_date, initial_code, timeout_seconds=90):
+    Log.info(f"Waiting for new Uber OTP in Google Sheet (Timeout: {timeout_seconds}s)...")
+    start = time.time()
+    while time.time() - start < timeout_seconds:
+        code, d_str, msg = get_current_sheet_state()
+        if code and (code != initial_code or d_str != initial_date):
+            Log.ok(f"Retrieved new OTP from Google Sheet: {code} (at {d_str})")
+            return code
+        time.sleep(4)
+    return None
+
+
+def handle_otp_input(page: Page, initial_sheet_date: str, initial_sheet_code: str):
+    Log.step("2FA", "2FA SMS OTP Verification Screen Detected")
+    otp = poll_for_new_otp(initial_sheet_date, initial_sheet_code, timeout_seconds=60)
+    if not otp:
+        otp, _, _ = get_current_sheet_state()
+
+    if otp and len(otp) == 4:
+        Log.ok(f"Entering 4-digit OTP: {otp}")
+        digit_inputs = page.locator('input[type="tel"], input[aria-label*="digit"], input[maxlength="1"]').all()
+        if len(digit_inputs) >= 4:
+            for idx, digit in enumerate(otp):
+                digit_inputs[idx].fill(digit)
+                time.sleep(random.uniform(0.1, 0.2))
+        else:
+            first_input = page.locator('input[type="tel"], input[type="text"]').first
+            if first_input.is_visible():
+                first_input.click()
+                first_input.fill("")
+                for digit in otp:
+                    page.keyboard.press(digit)
+                    time.sleep(random.uniform(0.1, 0.2))
+
+        time.sleep(1)
+        next_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button[type="submit"]').first
+        if next_btn.is_visible():
+            next_btn.click()
+        else:
+            page.keyboard.press("Enter")
+        time.sleep(5)
+
+
+def save_session_state(context: BrowserContext):
+    try:
+        cookies = context.cookies()
+        if cookies:
+            COOKIES_F.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+            Log.ok(f"Saved {len(cookies)} cookies to {COOKIES_F.name}")
+        storage = context.storage_state()
+        if storage:
+            STATE_F.write_text(json.dumps(storage, indent=2), encoding="utf-8")
+            Log.ok(f"Saved storage_state to {STATE_F.name}")
+    except Exception as e:
+        Log.warn(f"Note saving session: {e}")
+
+
+def ensure_login(page: Page, context: BrowserContext) -> bool:
+    time.sleep(3)
+    if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+        Log.ok(f"Active session confirmed on {page.url}")
+        save_session_state(context)
+        return True
+
+    Log.step("AUTH", "Automated Uber Login with Google Sheet OTP...")
+    init_code, init_date, _ = get_current_sheet_state()
+
+    # 1. Email
+    try:
+        email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS').first
+        if email_input.is_visible(timeout=5000):
+            Log.info(f"Entering login email: {UBER_EMAIL}")
+            email_input.fill("")
+            email_input.type(UBER_EMAIL, delay=30)
+            time.sleep(0.5)
+            continue_btn = page.locator('button:has-text("Continue"), button[type="submit"]').first
+            if continue_btn.is_visible():
+                continue_btn.click()
+            else:
+                page.keyboard.press("Enter")
+            time.sleep(4)
+    except Exception as e:
+        Log.warn(f"Email step note: {e}")
+
+    # 2. Password or More Options
+    pwd_inputs = page.locator('input[type="password"]')
+    if pwd_inputs.count() > 0 and pwd_inputs.first.is_visible():
+        Log.info("Entering password directly...")
+        pwd_inputs.first.fill("")
+        pwd_inputs.first.type(UBER_PASSWORD, delay=30)
+        time.sleep(0.5)
+        submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+        if submit_btn.is_visible():
+            submit_btn.click()
+        else:
+            page.keyboard.press("Enter")
+        time.sleep(5)
+    else:
+        more_opts = page.get_by_text("More options", exact=False).first
+        if more_opts.is_visible(timeout=4000):
+            Log.info("Clicking 'More options'...")
+            more_opts.click()
+            time.sleep(2)
+
+            see_all = page.get_by_text("See all options", exact=False).first
+            if see_all.is_visible(timeout=2000):
+                see_all.click()
+                time.sleep(2)
+
+            pwd_option = page.get_by_text("Password", exact=True).first
+            if not pwd_option.is_visible(timeout=2000):
+                pwd_option = page.locator('div[role="dialog"] >> text="Password"').first
+
+            if pwd_option.is_visible(timeout=3000):
+                Log.info("Selecting 'Password' option...")
+                pwd_option.click()
+                time.sleep(2.5)
+
+                pwd_input = page.locator('input[type="password"]').first
+                if pwd_input.is_visible(timeout=5000):
+                    Log.info("Entering password...")
+                    pwd_input.fill("")
+                    pwd_input.type(UBER_PASSWORD, delay=30)
+                    time.sleep(0.5)
+                    submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+                    if submit_btn.is_visible():
+                        submit_btn.click()
+                    else:
+                        page.keyboard.press("Enter")
+                    time.sleep(6)
+
+    # 3. 2FA OTP if prompted
+    time.sleep(2)
+    if "code" in page.content().lower() or page.locator('input[type="tel"]').count() > 0 or "verification" in page.content().lower():
+        handle_otp_input(page, init_date, init_code)
+
+    # 4. Wait for landing on supplier portal
+    for _ in range(15):
+        if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+            Log.ok(f"🎉 Successfully logged in! Landed on: {page.url}")
+            save_session_state(context)
+            return True
+        time.sleep(2)
+
+    return "supplier.uber.com" in page.url and "auth.uber.com" not in page.url
+
+
 def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previous_orgs: set) -> Page:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
@@ -211,6 +382,14 @@ def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previ
             Log.wait(4, f"Loading {city} promotions page")
             main_page = ensure_main_page(context, main_page)
             dismiss_banner(main_page)
+
+            # Check if redirected to auth
+            if "auth.uber.com" in main_page.url:
+                Log.warn(f"Redirected to auth.uber.com! Triggering automated login...")
+                if ensure_login(main_page, context):
+                    main_page.goto(url, timeout=45000, wait_until="domcontentloaded")
+                    time.sleep(4)
+                    dismiss_banner(main_page)
 
             if f"/orgs/{org_uuid}" in main_page.url:
                 exp_btn = main_page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
