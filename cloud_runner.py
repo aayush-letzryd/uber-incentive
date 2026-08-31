@@ -100,15 +100,20 @@ def sync_cookies_from_gcs():
         return
     try:
         bucket = client.bucket(BUCKET_NAME)
-        blob_cookies = bucket.blob(COOKIES_BLOB_NAME)
-        if blob_cookies.exists():
-            blob_cookies.download_to_filename(str(COOKIES_F))
-            print(f"[+] Downloaded latest cookies from gs://{BUCKET_NAME}/{COOKIES_BLOB_NAME}")
+        # Check both session/ and sessions/ paths
+        for blob_path in ["session/cookies.json", "sessions/cookies.json", "cookies.json"]:
+            blob = bucket.blob(blob_path)
+            if blob.exists():
+                blob.download_to_filename(str(COOKIES_F))
+                print(f"[+] Downloaded latest cookies from gs://{BUCKET_NAME}/{blob_path}")
+                break
 
-        blob_state = bucket.blob(STORAGE_STATE_BLOB_NAME)
-        if blob_state.exists():
-            blob_state.download_to_filename(str(STATE_F))
-            print(f"[+] Downloaded storage_state from gs://{BUCKET_NAME}/{STORAGE_STATE_BLOB_NAME}")
+        for blob_path in ["session/storage_state.json", "sessions/storage_state.json", "storage_state.json"]:
+            blob = bucket.blob(blob_path)
+            if blob.exists():
+                blob.download_to_filename(str(STATE_F))
+                print(f"[+] Downloaded storage_state from gs://{BUCKET_NAME}/{blob_path}")
+                break
     except Exception as e:
         print(f"[-] Note syncing session from GCS: {e}")
 
@@ -329,17 +334,17 @@ def log_execution_to_postgres(
             execution_date,
             attempt_number,
             status,
-            statement_start_date,
-            statement_end_date,
-            bangalore_rows,
-            mumbai_rows,
-            hyderabad_rows,
-            total_rows_ingested,
-            bangalore_gcs_url,
-            mumbai_gcs_url,
-            hyderabad_gcs_url,
-            master_gcs_url,
-            duration_seconds,
+            date_window_start,
+            date_window_end,
+            blr_rows,
+            mum_rows,
+            hyd_rows,
+            total_rows,
+            blr_file_url,
+            mum_file_url,
+            hyd_file_url,
+            master_file_url,
+            execution_duration_sec,
             error_message
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
         """
@@ -357,7 +362,7 @@ def log_execution_to_postgres(
             mum_url,
             hyd_url,
             master_url,
-            int(duration_sec),
+            float(duration_sec),
             error_msg
         ))
         conn.commit()

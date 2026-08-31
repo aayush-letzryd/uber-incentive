@@ -61,12 +61,14 @@ fi
 
 # 4. Upload initial auth cookies to bucket if available
 if [ -f "cookies.json" ]; then
+    gsutil cp cookies.json "gs://$BUCKET_NAME/session/cookies.json" >/dev/null 2>&1 || true
     gsutil cp cookies.json "gs://$BUCKET_NAME/sessions/cookies.json" >/dev/null 2>&1 || true
-    echo "🔑 Synced cookies.json to gs://$BUCKET_NAME/sessions/"
+    echo "🔑 Synced cookies.json to gs://$BUCKET_NAME/session/ and sessions/"
 fi
 if [ -f "storage_state.json" ]; then
+    gsutil cp storage_state.json "gs://$BUCKET_NAME/session/storage_state.json" >/dev/null 2>&1 || true
     gsutil cp storage_state.json "gs://$BUCKET_NAME/sessions/storage_state.json" >/dev/null 2>&1 || true
-    echo "🔑 Synced storage_state.json to gs://$BUCKET_NAME/sessions/"
+    echo "🔑 Synced storage_state.json to gs://$BUCKET_NAME/session/ and sessions/"
 fi
 
 # 5. Create Artifact Registry Docker Repository if not exists
