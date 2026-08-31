@@ -1,15 +1,16 @@
 """
-LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.1)
+LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.2)
 ================================================================
 Orchestrates:
-1. Retry Triggers: 07:00 AM, 08:10 AM, 09:00 AM, 10:00 AM IST
+1. Retry Triggers: 07:00 AM, 08:10 AM, 09:10 AM, 10:10 AM IST
 2. State idempotency (exits instantly if already succeeded today)
-3. Uber Official CSV Download across Bangalore, Mumbai, Hyderabad
-4. Multi-city Excel generation & Master 3-City Consolidation
-5. GCS Cloud Storage Bucket Upload (all 3 cities + combined)
-6. PostgreSQL Database Upsert Ingestion (data + log table with bucket URLs)
-7. Green Success Email (with GCS download links for all 3 cities & master, no heavy attachments)
-8. Red Failure Alert (only after 4th final retry fails)
+3. Session cookie sync to/from GCS bucket
+4. Uber Official CSV Download across Bangalore, Mumbai, Hyderabad
+5. Multi-city Excel generation & Master 3-City Consolidation
+6. GCS Cloud Storage Bucket Upload (all 3 cities + combined)
+7. PostgreSQL Database Upsert Ingestion (data + log table with bucket URLs)
+8. Green Success Email (with GCS download links for all 3 cities & master, no heavy attachments)
+9. Red Failure Alert (only after 4th final retry fails)
 """
 
 import sys, io
@@ -26,7 +27,7 @@ import pandas as pd
 
 from mailer import send_success_email, send_failure_email
 
-# Optional GCS & PostgreSQL imports
+# GCS & PostgreSQL imports
 try:
     from google.cloud import storage
     HAS_GCS = True
@@ -44,15 +45,61 @@ except ImportError:
 # CONFIGURATION
 # ==============================================================================
 BUCKET_NAME  = os.getenv("GCS_BUCKET_NAME", "letzryd-uber-reports")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:8S5%5DU3%40L%5EXz%29%5CFH%7D@35.200.196.113:5432/postgres")
 RECIPIENTS   = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
 
 BASE        = Path(__file__).parent
 OUT_DIR     = BASE / "uber_reports"
 STATE_DIR   = BASE / "state"
+COOKIES_F   = BASE / "cookies.json"
+STATE_F     = BASE / "storage_state.json"
 
 for d in [OUT_DIR, STATE_DIR]:
-    d.mkdir(exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
+
+
+def get_gcs_client():
+    if not HAS_GCS:
+        return None
+    try:
+        return storage.Client()
+    except Exception as e:
+        print(f"[*] GCS client init note: {e}", flush=True)
+        return None
+
+
+def sync_cookies_from_gcs():
+    """Downloads saved session cookies from GCS bucket if running in fresh container."""
+    client = get_gcs_client()
+    if not client:
+        return
+
+    try:
+        bucket = client.bucket(BUCKET_NAME)
+        for fname, local_path in [("cookies.json", COOKIES_F), ("storage_state.json", STATE_F)]:
+            blob = bucket.blob(f"sessions/{fname}")
+            if blob.exists():
+                blob.download_to_filename(str(local_path))
+                print(f"🔑 Synced {fname} from gs://{BUCKET_NAME}/sessions/", flush=True)
+    except Exception as e:
+        print(f"[*] Cookie download from GCS note: {e}", flush=True)
+
+
+def sync_cookies_to_gcs():
+    """Uploads active session cookies to GCS bucket to persist between ephemeral container runs."""
+    client = get_gcs_client()
+    if not client:
+        return
+
+    try:
+        bucket = client.bucket(BUCKET_NAME)
+        for fname, local_path in [("cookies.json", COOKIES_F), ("storage_state.json", STATE_F)]:
+            if local_path.exists():
+                blob = bucket.blob(f"sessions/{fname}")
+                blob.upload_from_filename(str(local_path))
+                print(f"☁️ Backed up {fname} to gs://{BUCKET_NAME}/sessions/", flush=True)
+    except Exception as e:
+        print(f"[*] Cookie backup to GCS note: {e}", flush=True)
 
 
 def get_today_str():
@@ -63,18 +110,18 @@ def check_gcs_state(today_str: str) -> dict:
     local_state_file = STATE_DIR / f"{today_str}.json"
     if local_state_file.exists():
         try:
-            return json.loads(local_state_file.read_text())
+            return json.loads(local_state_file.read_text(encoding="utf-8"))
         except Exception:
             pass
 
-    if HAS_GCS and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+    client = get_gcs_client()
+    if client:
         try:
-            client = storage.Client()
             bucket = client.bucket(BUCKET_NAME)
             blob = bucket.blob(f"state/{today_str}.json")
             if blob.exists():
                 data = json.loads(blob.download_as_text())
-                local_state_file.write_text(json.dumps(data))
+                local_state_file.write_text(json.dumps(data), encoding="utf-8")
                 return data
         except Exception as e:
             print(f"[*] GCS state check note: {e}", flush=True)
@@ -84,11 +131,11 @@ def check_gcs_state(today_str: str) -> dict:
 
 def save_gcs_state(today_str: str, state_data: dict):
     local_state_file = STATE_DIR / f"{today_str}.json"
-    local_state_file.write_text(json.dumps(state_data, indent=2))
+    local_state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
 
-    if HAS_GCS and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+    client = get_gcs_client()
+    if client:
         try:
-            client = storage.Client()
             bucket = client.bucket(BUCKET_NAME)
             blob = bucket.blob(f"state/{today_str}.json")
             blob.upload_from_string(json.dumps(state_data, indent=2), content_type="application/json")
@@ -99,25 +146,63 @@ def save_gcs_state(today_str: str, state_data: dict):
 def upload_reports_to_gcs(today_str: str, files_to_upload: list[Path]) -> dict[str, str]:
     """Uploads individual and master CSV & Excel files to GCS and returns mapping."""
     uploaded_urls = {}
-    if not (HAS_GCS and os.getenv("GOOGLE_APPLICATION_CREDENTIALS")):
-        for f in files_to_upload:
-            uploaded_urls[f.name] = f"https://storage.googleapis.com/{BUCKET_NAME}/daily_exports/{today_str}/{f.name}"
-        return uploaded_urls
+    client = get_gcs_client()
 
-    try:
-        client = storage.Client()
-        bucket = client.bucket(BUCKET_NAME)
-        for f in files_to_upload:
-            if f.exists():
-                blob_path = f"daily_exports/{today_str}/{f.name}"
-                blob = bucket.blob(blob_path)
-                blob.upload_from_filename(str(f))
-                public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_path}"
-                uploaded_urls[f.name] = public_url
-                print(f"☁️ Uploaded to GCS: {public_url}", flush=True)
-    except Exception as e:
-        print(f"[-] GCS upload error: {e}", flush=True)
+    for f in files_to_upload:
+        if f.exists():
+            blob_path = f"daily_exports/{today_str}/{f.name}"
+            public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_path}"
+            if client:
+                try:
+                    bucket = client.bucket(BUCKET_NAME)
+                    blob = bucket.blob(blob_path)
+                    blob.upload_from_filename(str(f))
+                    print(f"☁️ Uploaded to GCS: {public_url}", flush=True)
+                except Exception as e:
+                    print(f"[-] GCS upload error for {f.name}: {e}", flush=True)
+            uploaded_urls[f.name] = public_url
     return uploaded_urls
+
+
+# Field cleaning helpers for database safety
+def clean_str(val):
+    if pd.isna(val) or val is None:
+        return None
+    s = str(val).strip()
+    return s if s and s.lower() != "nan" else None
+
+def clean_float(val):
+    if pd.isna(val) or val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace("%", "").replace("₹", "").replace(",", "").strip()
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def clean_int(val, default=0):
+    if pd.isna(val) or val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    s = str(val).replace(",", "").strip()
+    try:
+        return int(float(s))
+    except Exception:
+        return default
+
+def clean_timestamp(val):
+    if pd.isna(val) or val is None:
+        return None
+    try:
+        dt = pd.to_datetime(val)
+        if pd.isna(dt):
+            return None
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
 
 
 def ingest_df_to_postgres(df: pd.DataFrame, city: str):
@@ -125,12 +210,17 @@ def ingest_df_to_postgres(df: pd.DataFrame, city: str):
     if not (HAS_PG and DATABASE_URL):
         return
 
+    conn = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
-        # Deduplicate on constraint columns
-        clean_df = df.drop_duplicates(subset=['Number plate', 'Start date', 'End date', 'Trip target'], keep='last')
+        clean_df = df.copy()
+        clean_df.columns = clean_df.columns.str.strip()
+
+        required_subset = [c for c in ['Number plate', 'Start date', 'End date', 'Trip target'] if c in clean_df.columns]
+        if len(required_subset) == 4:
+            clean_df = clean_df.drop_duplicates(subset=required_subset, keep='last')
 
         query = """
         INSERT INTO uber_vehicle_incentives_raw (
@@ -150,28 +240,39 @@ def ingest_df_to_postgres(df: pd.DataFrame, city: str):
 
         records = []
         for _, r in clean_df.iterrows():
+            plate = clean_str(r.get("Number plate"))
+            if not plate:
+                continue
+
+            start_dt = clean_timestamp(r.get("Start date")) or clean_timestamp(datetime.date.today())
+            end_dt   = clean_timestamp(r.get("End date")) or start_dt
+
             records.append((
                 city,
-                str(r.get("Vehicle name", "")) if pd.notnull(r.get("Vehicle name")) else None,
-                str(r.get("Number plate", "")),
-                r.get("Start date"),
-                r.get("End date"),
-                float(r.get("Acceptance rate")) if pd.notnull(r.get("Acceptance rate")) else None,
-                float(r.get("Target acceptance rate")) if pd.notnull(r.get("Target acceptance rate")) else None,
-                int(r.get("Trips completed", 0)) if pd.notnull(r.get("Trips completed")) else 0,
-                int(r.get("Trip target", 0)) if pd.notnull(r.get("Trip target")) else 0,
-                float(r.get("Total payout", 0)) if pd.notnull(r.get("Total payout")) else 0.0,
-                str(r.get("Status", "")) if pd.notnull(r.get("Status")) else None,
-                str(r.get("Driver trip count breakdown", "")) if pd.notnull(r.get("Driver trip count breakdown")) else None
+                clean_str(r.get("Vehicle name")),
+                plate,
+                start_dt,
+                end_dt,
+                clean_float(r.get("Acceptance rate")),
+                clean_float(r.get("Target acceptance rate")),
+                clean_int(r.get("Trips completed"), 0),
+                clean_int(r.get("Trip target"), 0),
+                clean_float(r.get("Total payout")) or 0.0,
+                clean_str(r.get("Status")),
+                clean_str(r.get("Driver trip count breakdown"))
             ))
 
-        execute_values(cur, query, records, page_size=2000)
-        conn.commit()
+        if records:
+            execute_values(cur, query, records, page_size=2000)
+            conn.commit()
+            print(f"🗄️ Ingested {len(records):,} records into PostgreSQL ({city})", flush=True)
         cur.close()
-        conn.close()
-        print(f"🗄️ Ingested {len(records):,} records into PostgreSQL ({city})", flush=True)
     except Exception as e:
         print(f"[-] Database ingestion error: {e}", flush=True)
+    finally:
+        if conn:
+            try: conn.close()
+            except Exception: pass
 
 
 def log_execution_to_postgres(
@@ -191,16 +292,17 @@ def log_execution_to_postgres(
     duration_sec: float,
     error_msg: str = None
 ):
-    """Inserts a run record into the uber_ingestion_logs table."""
+    """Inserts a run record into the uber_incentives_ingestion_log table."""
     if not (HAS_PG and DATABASE_URL):
         return
 
+    conn = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
         query = """
-        INSERT INTO uber_ingestion_logs (
+        INSERT INTO uber_incentives_ingestion_log (
             execution_date, attempt_number, status, date_window_start, date_window_end,
             blr_rows, mum_rows, hyd_rows, total_rows,
             blr_file_url, mum_file_url, hyd_file_url, master_file_url,
@@ -216,10 +318,13 @@ def log_execution_to_postgres(
         ))
         conn.commit()
         cur.close()
-        conn.close()
-        print("🗄️ Logged execution details into uber_ingestion_logs", flush=True)
+        print("🗄️ Logged execution details into uber_incentives_ingestion_log", flush=True)
     except Exception as e:
         print(f"[-] DB logging error: {e}", flush=True)
+    finally:
+        if conn:
+            try: conn.close()
+            except Exception: pass
 
 
 def run_pipeline():
@@ -238,6 +343,9 @@ def run_pipeline():
     print(f"   Date: {today_str} | Time: {datetime.datetime.now().strftime('%H:%M:%S IST')}")
     print(f"==========================================================")
 
+    # Sync cookies from GCS before launching browser
+    sync_cookies_from_gcs()
+
     start_time = time.time()
     success = False
     error_reason = ""
@@ -251,76 +359,81 @@ def run_pipeline():
         if not master_files:
             master_files = list(OUT_DIR.glob(f"*ALL_3_CITIES.xlsx"))
 
-        if master_files:
-            master_path = master_files[0]
-            master_df = pd.read_excel(master_path)
+        if not master_files:
+            raise RuntimeError(f"Automation executed but no Master Excel file was found in {OUT_DIR}")
 
-            # Ingest to DB
-            for city in master_df["City"].unique():
-                city_df = master_df[master_df["City"] == city]
-                ingest_df_to_postgres(city_df, city)
+        master_path = master_files[0]
+        master_df = pd.read_excel(master_path)
 
-            # Upload all files to GCS Bucket
-            all_reports = list(OUT_DIR.glob("*.xlsx")) + list(OUT_DIR.glob("*.csv"))
-            uploaded_urls = upload_reports_to_gcs(today_str, all_reports)
+        # Ingest each city to DB
+        for city in master_df["City"].unique():
+            city_df = master_df[master_df["City"] == city]
+            ingest_df_to_postgres(city_df, city)
 
-            # Match city URLs
-            blr_url = next((u for k, u in uploaded_urls.items() if "blr" in k.lower() and k.endswith(".xlsx")), "#")
-            mum_url = next((u for k, u in uploaded_urls.items() if "mum" in k.lower() and k.endswith(".xlsx")), "#")
-            hyd_url = next((u for k, u in uploaded_urls.items() if "hyd" in k.lower() and k.endswith(".xlsx")), "#")
-            master_url = next((u for k, u in uploaded_urls.items() if "all_3_cities" in k.lower() and k.endswith(".xlsx")), "#")
+        # Upload all files to GCS Bucket
+        all_reports = list(OUT_DIR.glob("*.xlsx")) + list(OUT_DIR.glob("*.csv"))
+        uploaded_urls = upload_reports_to_gcs(today_str, all_reports)
 
-            # Row stats
-            blr_rows = len(master_df[master_df["City"] == "Bangalore"])
-            mum_rows = len(master_df[master_df["City"] == "Mumbai"])
-            hyd_rows = len(master_df[master_df["City"] == "Hyderabad"])
-            total_rows = len(master_df)
+        # Match city URLs
+        blr_url = next((u for k, u in uploaded_urls.items() if "blr" in k.lower() and k.endswith(".xlsx")), "#")
+        mum_url = next((u for k, u in uploaded_urls.items() if "mum" in k.lower() and k.endswith(".xlsx")), "#")
+        hyd_url = next((u for k, u in uploaded_urls.items() if "hyd" in k.lower() and k.endswith(".xlsx")), "#")
+        master_url = next((u for k, u in uploaded_urls.items() if "all_3_cities" in k.lower() and k.endswith(".xlsx")), "#")
 
-            start_dt = str(master_df["Start date"].iloc[0])[:10] if "Start date" in master_df.columns and len(master_df) > 0 else today_str
-            end_dt   = str(master_df["End date"].iloc[0])[:10] if "End date" in master_df.columns and len(master_df) > 0 else today_str
-            date_window = f"{start_dt} to {end_dt}"
-            duration_sec = time.time() - start_time
-            duration_str = f"{duration_sec / 60:.1f} minutes"
+        # Row stats
+        blr_rows = len(master_df[master_df["City"] == "Bangalore"])
+        mum_rows = len(master_df[master_df["City"] == "Mumbai"])
+        hyd_rows = len(master_df[master_df["City"] == "Hyderabad"])
+        total_rows = len(master_df)
 
-            # Log to DB log table
-            log_execution_to_postgres(
-                today_str=today_str,
-                attempt=current_attempt,
-                status="SUCCESS",
-                start_dt=start_dt,
-                end_dt=end_dt,
-                blr_rows=blr_rows,
-                mum_rows=mum_rows,
-                hyd_rows=hyd_rows,
-                total_rows=total_rows,
-                blr_url=blr_url,
-                mum_url=mum_url,
-                hyd_url=hyd_url,
-                master_url=master_url,
-                duration_sec=duration_sec
-            )
+        start_dt = str(master_df["Start date"].iloc[0])[:10] if "Start date" in master_df.columns and len(master_df) > 0 else today_str
+        end_dt   = str(master_df["End date"].iloc[0])[:10] if "End date" in master_df.columns and len(master_df) > 0 else today_str
+        date_window = f"{start_dt} to {end_dt}"
+        duration_sec = time.time() - start_time
+        duration_str = f"{duration_sec / 60:.1f} minutes"
 
-            # Dispatch Green Success Email with direct GCS download links (no heavy attachments)
-            send_success_email(
-                date_window=date_window,
-                blr_rows=blr_rows,
-                mum_rows=mum_rows,
-                hyd_rows=hyd_rows,
-                total_rows=total_rows,
-                duration_str=duration_str,
-                blr_file_url=blr_url,
-                mum_file_url=mum_url,
-                hyd_file_url=hyd_url,
-                master_file_url=master_url,
-                recipients=RECIPIENTS
-            )
+        # Log to DB log table
+        log_execution_to_postgres(
+            today_str=today_str,
+            attempt=current_attempt,
+            status="SUCCESS",
+            start_dt=start_dt,
+            end_dt=end_dt,
+            blr_rows=blr_rows,
+            mum_rows=mum_rows,
+            hyd_rows=hyd_rows,
+            total_rows=total_rows,
+            blr_url=blr_url,
+            mum_url=mum_url,
+            hyd_url=hyd_url,
+            master_url=master_url,
+            duration_sec=duration_sec
+        )
 
-            # Mark state as SUCCESS
-            state["status"] = "SUCCESS"
-            state["attempts"] = current_attempt
-            state["completed_at"] = datetime.datetime.now().isoformat()
-            save_gcs_state(today_str, state)
-            success = True
+        # Dispatch Green Success Email with direct GCS download links
+        send_success_email(
+            date_window=date_window,
+            blr_rows=blr_rows,
+            mum_rows=mum_rows,
+            hyd_rows=hyd_rows,
+            total_rows=total_rows,
+            duration_str=duration_str,
+            blr_file_url=blr_url,
+            mum_file_url=mum_url,
+            hyd_file_url=hyd_url,
+            master_file_url=master_url,
+            recipients=RECIPIENTS
+        )
+
+        # Back up active session cookies to GCS
+        sync_cookies_to_gcs()
+
+        # Mark state as SUCCESS
+        state["status"] = "SUCCESS"
+        state["attempts"] = current_attempt
+        state["completed_at"] = datetime.datetime.now().isoformat()
+        save_gcs_state(today_str, state)
+        success = True
 
     except Exception as e:
         error_reason = str(e)
@@ -333,7 +446,6 @@ def run_pipeline():
         state["last_error"] = error_reason
         save_gcs_state(today_str, state)
 
-        # Log failed attempt to DB log table
         log_execution_to_postgres(
             today_str=today_str,
             attempt=current_attempt,
@@ -352,7 +464,6 @@ def run_pipeline():
             error_msg=error_reason
         )
 
-        # Only send failure alert if this is the 4th (final) attempt
         if current_attempt >= 4:
             print(f"🚨 Final attempt {current_attempt} failed. Dispatching Red Alert Email to operations team...")
             send_failure_email(

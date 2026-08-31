@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS uber_vehicle_incentives_raw (
     driver_trip_count_breakdown TEXT,
     org_name                    VARCHAR(150),
     ingested_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_vehicle_incentive_window UNIQUE (city, number_plate, start_date, end_date)
+    CONSTRAINT uq_vehicle_incentive_window UNIQUE (city, number_plate, start_date, end_date, trip_target)
 );
 
 CREATE INDEX IF NOT EXISTS idx_uber_inc_city ON uber_vehicle_incentives_raw(city);
@@ -29,7 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_uber_inc_status ON uber_vehicle_incentives_raw(st
 
 
 -- 2. PIPELINE INGESTION LOG TABLE (With GCS File Links)
-CREATE TABLE IF NOT EXISTS uber_ingestion_logs (
+CREATE TABLE IF NOT EXISTS uber_incentives_ingestion_log (
     id                          BIGSERIAL PRIMARY KEY,
     execution_date              DATE NOT NULL,
     attempt_number              INTEGER NOT NULL DEFAULT 1,
@@ -49,5 +49,5 @@ CREATE TABLE IF NOT EXISTS uber_ingestion_logs (
     created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_uber_logs_date ON uber_ingestion_logs(execution_date);
-CREATE INDEX IF NOT EXISTS idx_uber_logs_status ON uber_ingestion_logs(status);
+CREATE INDEX IF NOT EXISTS idx_uber_logs_date ON uber_incentives_ingestion_log(execution_date);
+CREATE INDEX IF NOT EXISTS idx_uber_logs_status ON uber_incentives_ingestion_log(status);

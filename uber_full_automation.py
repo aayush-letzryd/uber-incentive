@@ -1,9 +1,10 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v3.1)
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.2)
 ====================================================================
 Clicks 'Export' button on Promotions tab -> Waits for Uber backend generation ->
 Captures native CSV download into Downloads / uber_reports -> Builds Master Report.
 Covers Bangalore (BLR P), Mumbai (MUM P), and Hyderabad (HYD P).
+Cross-platform compatible (Windows + Linux Docker / GCP Cloud Run).
 """
 
 import sys, io
@@ -59,10 +60,11 @@ PROFILE_DIR = BASE / "uber_chrome_profile"
 SS_DIR      = BASE / "screenshots"
 OUT_DIR     = BASE / "uber_reports"
 COOKIES_F   = BASE / "cookies.json"
-USER_DL_DIR = Path(r"C:\Users\anura\Downloads")
+STATE_F     = BASE / "storage_state.json"
+USER_DL_DIR = Path(os.getenv("DOWNLOADS_DIR", str(Path.home() / "Downloads")))
 
-for d in [PROFILE_DIR, SS_DIR, OUT_DIR]:
-    d.mkdir(exist_ok=True)
+for d in [PROFILE_DIR, SS_DIR, OUT_DIR, USER_DL_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
 
 class Log:
@@ -112,7 +114,7 @@ def cleanup_locks():
 def load_session(context: BrowserContext) -> bool:
     if COOKIES_F.exists():
         try:
-            cookies = json.loads(COOKIES_F.read_text())
+            cookies = json.loads(COOKIES_F.read_text(encoding="utf-8"))
             context.add_cookies(cookies)
             Log.ok(f"Loaded {len(cookies)} cached session cookies")
             return True
@@ -183,7 +185,7 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
     city = target["city"]
     code = target["code"]
     kw   = target["file_keyword"]
-    max_wait = target.get("max_wait_seconds", 720)
+    max_wait = target.get("max_wait_seconds", 900)
     today = datetime.datetime.now().strftime("%Y%m%d")
     Log.step("EXPORT", f"Triggering Official Export & Download for {city} ({code})")
 
@@ -194,7 +196,20 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
         Log.err(f"Export button not visible on {city} Promotions page!")
         return None
 
-    # Track download trigger timestamp
+    download_info = {"file": None}
+
+    def on_download(download):
+        Log.ok(f"📥 Download event received: {download.suggested_filename}")
+        dest = OUT_DIR / download.suggested_filename
+        try:
+            download.save_as(str(dest))
+            download_info["file"] = dest
+            Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
+        except Exception as e:
+            Log.warn(f"Download save_as note: {e}")
+
+    page.on("download", on_download)
+
     trigger_time = time.time()
     Log.info(f"Clicking 'Export' button for {city}...")
     try:
@@ -210,24 +225,22 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        # Watch Downloads and OUT_DIR for the newly modified official CSV
-        for search_dir in [USER_DL_DIR, OUT_DIR]:
+        if download_info["file"] and download_info["file"].exists() and download_info["file"].stat().st_size > 100:
+            found_file = download_info["file"]
+            break
+
+        # Scan OUT_DIR and USER_DL_DIR
+        for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
                 for f in search_dir.glob("*.csv"):
                     if "vehicle_incentives" in f.name.lower() and kw.lower() in f.name.lower():
                         try:
-                            # File must have been created/modified after export was clicked
                             if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
-                                # Ensure file is not currently being written
-                                initial_size = f.stat().st_size
-                                time.sleep(2)
-                                if f.stat().st_size == initial_size:
-                                    Log.ok(f"🎯 Picked up downloaded CSV: {f.name} ({f.stat().st_size:,} bytes)")
-                                    dest = OUT_DIR / f.name
-                                    if f != dest:
-                                        shutil.copy2(str(f), str(dest))
-                                    found_file = dest
-                                    break
+                                dest = OUT_DIR / f.name
+                                if f != dest:
+                                    shutil.copy2(str(f), str(dest))
+                                found_file = dest
+                                break
                         except Exception:
                             pass
             if found_file:
@@ -242,6 +255,11 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
             Log.info(f"Still waiting on Uber backend export... ({mins}m {secs}s / {max_wait//60}m)")
 
         time.sleep(3)
+
+    try:
+        page.remove_listener("download", on_download)
+    except Exception:
+        pass
 
     if found_file and found_file.exists():
         dest_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
@@ -264,6 +282,39 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
     return None
 
 
+def get_browser_launch_config():
+    is_container = (
+        os.path.exists("/.dockerenv")
+        or os.getenv("K_SERVICE") is not None
+        or os.getenv("CONTAINER") == "true"
+        or sys.platform.startswith("linux")
+    )
+    
+    headless_env = os.getenv("HEADLESS")
+    if headless_env is not None:
+        headless = headless_env.lower() in ("true", "1", "yes")
+    else:
+        headless = is_container
+
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-default-browser-check",
+        "--lang=en-IN,en"
+    ]
+
+    if headless:
+        args.extend([
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu"
+        ])
+
+    channel = None if (is_container or headless) else "chrome"
+    return headless, channel, args
+
+
 # ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
@@ -274,23 +325,24 @@ def main():
     print("=" * 75)
 
     cleanup_locks()
+    headless, channel, args = get_browser_launch_config()
 
     with sync_playwright() as pw:
-        Log.info("Launching Chrome...")
-        context = pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=False,
-            viewport={"width": 1440, "height": 900},
-            accept_downloads=True,
-            downloads_path=str(OUT_DIR),
-            ignore_default_args=["--enable-automation"],
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars"
-            ]
-        )
+        Log.info(f"Launching Browser (Headless: {headless}, Channel: {channel or 'bundled-chromium'})...")
+        
+        launch_kwargs = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": headless,
+            "viewport": {"width": 1440, "height": 900},
+            "accept_downloads": True,
+            "downloads_path": str(OUT_DIR),
+            "ignore_default_args": ["--enable-automation"],
+            "args": args
+        }
+        if channel:
+            launch_kwargs["channel"] = channel
 
+        context = pw.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else context.new_page()
         load_session(context)
 

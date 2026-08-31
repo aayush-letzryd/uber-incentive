@@ -10,11 +10,19 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 # SMTP CONFIGURATION
-SMTP_SERVER   = "smtp.gmail.com"
-SMTP_PORT     = 465
-SMTP_USER     = "vendor_aayush@letzryd.com"
-SMTP_PASSWORD = "gqnk qlhy rdcl rwrn".replace(" ", "")  # Google App Password
-DEFAULT_RECIPIENTS = ["vendor_aayush@letzryd.com"]
+SMTP_SERVER   = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER     = os.getenv("SMTP_USER", "vendor_aayush@letzryd.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "gqnk qlhy rdcl rwrn".replace(" ", ""))
+DEFAULT_RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
+
+
+def _normalize_recipients(recipients):
+    if recipients is None:
+        return DEFAULT_RECIPIENTS
+    if isinstance(recipients, str):
+        return [r.strip() for r in recipients.split(",") if r.strip()]
+    return recipients
 
 
 def send_success_email(
@@ -34,8 +42,7 @@ def send_success_email(
     Sends LetzRyd branded Green Success Email with cloud bucket download links for all 3 cities & Master report.
     No heavy attachments - all files downloadable via GCS links.
     """
-    if recipients is None:
-        recipients = DEFAULT_RECIPIENTS
+    recipients = _normalize_recipients(recipients)
 
     msg = MIMEMultipart("alternative")
     subject = f"✅ [SUCCESS] LetzRyd Uber Statement Ingested ({date_window})"
@@ -44,6 +51,11 @@ def send_success_email(
     msg["To"] = ", ".join(recipients)
 
     now_ist = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p IST")
+
+    blr_fmt   = f"{int(blr_rows or 0):,}"
+    mum_fmt   = f"{int(mum_rows or 0):,}"
+    hyd_fmt   = f"{int(hyd_rows or 0):,}"
+    total_fmt = f"{int(total_rows or 0):,}"
 
     html_content = f"""<!DOCTYPE html>
 <html>
@@ -139,16 +151,6 @@ def send_success_email(
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }}
-  .dl-row {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid #f1f5f9;
-  }}
-  .dl-row:last-child {{
-    border-bottom: none;
-  }}
   .dl-link {{
     color: #047857;
     text-decoration: none;
@@ -157,9 +159,6 @@ def send_success_email(
     background: #e6f4ea;
     padding: 4px 10px;
     border-radius: 6px;
-  }}
-  .dl-link:hover {{
-    background: #cbf0d7;
   }}
   .btn-master {{
     display: block;
@@ -203,19 +202,19 @@ def send_success_email(
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Bangalore Ingested:</td>
-            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{blr_rows:,} records</td>
+            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{blr_fmt} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Mumbai Ingested:</td>
-            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{mum_rows:,} records</td>
+            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{mum_fmt} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Hyderabad Ingested:</td>
-            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{hyd_rows:,} records</td>
+            <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{hyd_fmt} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Total Master Records:</td>
-            <td style="padding: 7px 0; color: #047857; font-weight: 800; text-align: right;">{total_rows:,} rows</td>
+            <td style="padding: 7px 0; color: #047857; font-weight: 800; text-align: right;">{total_fmt} rows</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Execution Duration:</td>
@@ -281,8 +280,7 @@ def send_failure_email(
     Sends LetzRyd Red Failure Alert Email matching fleet operations standard template.
     Only triggered after the 4th (final) attempt fails.
     """
-    if recipients is None:
-        recipients = DEFAULT_RECIPIENTS
+    recipients = _normalize_recipients(recipients)
 
     msg = MIMEMultipart("alternative")
     subject = f"⚠️ [ALERT] LetzRyd Uber Ingestion Failed ({date_window})"

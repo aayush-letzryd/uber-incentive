@@ -1,0 +1,11 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+uber_chrome_profile/
+screenshots/
+downloads/
+uber_reports/
+state/
+*.log
+.env
