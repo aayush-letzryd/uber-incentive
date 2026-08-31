@@ -162,22 +162,55 @@ def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict
                             opt.click()
                             print(f"✅ Selected {city} ({query}) from UI switcher!")
                             time.sleep(4)
+                            time.sleep(6)  # Wait for page to fully navigate after switch
                             break
                         except Exception:
                             pass
 
+                # If none of the text queries matched, try scrolling down in the list to find HYD
+                if not any(kw in main_page.url for kw in ["HYD", "hyd"]):
+                    print(f"[*] Scrolling account list to find HYD P...")
+                    account_list = main_page.locator('[data-testid="account-list"], [class*="account"], [class*="switcher"]').first
+                    for _ in range(5):
+                        try:
+                            main_page.keyboard.press("PageDown")
+                            time.sleep(1)
+                            for query in ["HYD P", "HYD", "Hyderabad", acct, short]:
+                                opt = main_page.locator(f'text="{query}"').first
+                                if opt.is_visible(timeout=800):
+                                    opt.scroll_into_view_if_needed()
+                                    opt.click()
+                                    print(f"✅ Selected {city} ({query}) from UI switcher (after scroll)!")
+                                    time.sleep(6)
+                                    break
+                        except Exception:
+                            pass
+
         main_page = ensure_main_page(context, main_page)
-        if "/promotions" not in main_page.url:
-            if "/orgs/" in main_page.url:
-                current_org = main_page.url.split("/orgs/")[1].split("/")[0]
-                promo_url = f"https://supplier.uber.com/orgs/{current_org}/promotions"
+
+        # --- CRITICAL: Wait for URL to change away from previous city ---
+        # Navigate directly to promotions on whatever org is now active
+        time.sleep(3)
+        current_url = main_page.url
+
+        if "/orgs/" in current_url:
+            current_org = current_url.split("/orgs/")[1].split("/")[0]
+            promo_url = f"https://supplier.uber.com/orgs/{current_org}/promotions"
+            if "/promotions" not in current_url:
                 main_page.goto(promo_url, timeout=30000, wait_until="domcontentloaded")
                 time.sleep(3)
-            else:
-                promo_tab = main_page.locator('a:has-text("Promotions")').first
-                if promo_tab.is_visible(timeout=3000):
-                    promo_tab.click()
-                    time.sleep(3)
+
+            # Check the page header to confirm correct account is loaded
+            try:
+                header_text = main_page.locator("h1, h2, [class*='org-name'], [class*='account-name']").first.inner_text(timeout=3000)
+                print(f"[+] Current account on page: '{header_text}' | URL org: {current_org}")
+            except Exception:
+                print(f"[+] Current page URL: {current_url}")
+        elif "/promotions" not in current_url:
+            promo_tab = main_page.locator('a:has-text("Promotions")').first
+            if promo_tab.is_visible(timeout=3000):
+                promo_tab.click()
+                time.sleep(3)
 
         dismiss_banner(main_page)
         return main_page
@@ -186,7 +219,7 @@ def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict
         return ensure_main_page(context, main_page)
 
 
-def export_and_download_visual(context: BrowserContext, main_page: Page, target: dict, download_state: dict) -> Path:
+def export_and_download_visual(context: BrowserContext, main_page: Page, target: dict, download_state: dict, seen_files: set = None) -> Path:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
     code = target["code"]
@@ -209,6 +242,9 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
 
     print(f"🎯 Found 'Export' button! Clicking now...")
 
+    if seen_files is None:
+        seen_files = set()
+
     download_state["latest_file"] = None
     trigger_time = time.time()
 
@@ -226,11 +262,12 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        # 1. Check download state from context listener
+        # 1. Check download state from context listener — skip if already seen
         if download_state.get("latest_file") and download_state["latest_file"].exists():
-            if is_valid_incentive_file(download_state["latest_file"]):
-                found_file = download_state["latest_file"]
-                break
+            if str(download_state["latest_file"]) not in seen_files:
+                if is_valid_incentive_file(download_state["latest_file"]):
+                    found_file = download_state["latest_file"]
+                    break
 
         # 2. Scan OUT_DIR and USER_DL_DIR — catch .csv AND UUID-named files (no extension)
         for search_dir in [OUT_DIR, USER_DL_DIR]:
@@ -241,13 +278,18 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
                     # Skip partial downloads and temp files
                     if f.suffix in [".crdownload", ".tmp", ".part"]:
                         continue
+                    # Skip files already claimed by a previous city
+                    if str(f) in seen_files:
+                        continue
                     try:
-                        if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
+                        # Strict: file must have been created AFTER this city's export click
+                        if f.stat().st_mtime >= trigger_time and f.stat().st_size > 100:
                             if is_valid_incentive_file(f):
                                 dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
                                 if f != dest:
                                     shutil.copy2(str(f), str(dest))
                                 found_file = dest
+                                seen_files.add(str(f))
                                 print(f"\n📥 Found downloaded file: {f.name} -> {dest.name}")
                                 break
                     except Exception:
@@ -360,6 +402,7 @@ def run():
 
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
+        seen_files: set = set()  # Track files claimed by previous cities — prevents cross-contamination
 
         for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city_visual(context, main_page, target)
@@ -368,7 +411,7 @@ def run():
             refresh_page_before_export(main_page, target["city"], refreshes=3)
             # Reset download state so we don't accidentally pick up the previous city's late event
             download_state["latest_file"] = None
-            csv_path = export_and_download_visual(context, main_page, target, download_state)
+            csv_path = export_and_download_visual(context, main_page, target, download_state, seen_files)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
