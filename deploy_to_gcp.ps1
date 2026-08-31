@@ -76,6 +76,33 @@ if (Test-Path "storage_state.json") {
 
 # 4a. Setup Secrets in Secret Manager
 Write-Host "`n[*] 4a. Ensuring Secrets in Secret Manager..." -ForegroundColor Yellow
+
+# Load from .env.secrets if present
+$PgPass = $env:PG_PASSWORD
+$UberPass = $env:UBER_PASSWORD
+$SmtpPass = $env:SMTP_PASSWORD
+
+if (Test-Path ".env.secrets") {
+    Get-Content ".env.secrets" | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+            $parts = $line.Split("=", 2)
+            $k = $parts[0].Trim()
+            $v = $parts[1].Trim()
+            if ($k -eq "PG_PASSWORD" -and -not $PgPass) { $PgPass = $v }
+            if ($k -eq "UBER_PASSWORD" -and -not $UberPass) { $UberPass = $v }
+            if ($k -eq "SMTP_PASSWORD" -and -not $SmtpPass) { $SmtpPass = $v }
+        }
+    }
+}
+
+if (-not $PgPass -or -not $UberPass -or -not $SmtpPass) {
+    Write-Host "`n[!] Secrets required (PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD)." -ForegroundColor Yellow
+    if (-not $PgPass) { $PgPass = Read-Host -Prompt "Enter PG_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+    if (-not $UberPass) { $UberPass = Read-Host -Prompt "Enter UBER_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+    if (-not $SmtpPass) { $SmtpPass = Read-Host -Prompt "Enter SMTP_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+}
+
 function Set-GcpSecret($name, $val) {
     gcloud secrets describe $name --project $ProjectId 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -84,9 +111,9 @@ function Set-GcpSecret($name, $val) {
         $val | gcloud secrets create $name --data-file=- --replication-policy="automatic" --project $ProjectId
     }
 }
-Set-GcpSecret "PG_PASSWORD" "8S5]U3@L^Xz)\FH}"
-Set-GcpSecret "UBER_PASSWORD" "Letzuberp123"
-Set-GcpSecret "SMTP_PASSWORD" "gqnkqlhyrdclrwrn"
+Set-GcpSecret "PG_PASSWORD" $PgPass
+Set-GcpSecret "UBER_PASSWORD" $UberPass
+Set-GcpSecret "SMTP_PASSWORD" $SmtpPass
 
 # 5. Ensure Artifact Registry Repository exists
 Write-Host "`n[*] 5. Ensuring Artifact Registry: $RepoName..." -ForegroundColor Yellow
@@ -114,7 +141,7 @@ gcloud run jobs deploy $JobName `
     --cpu 2 `
     --task-timeout 3600s `
     --max-retries 0 `
-    --set-env-vars="GCS_BUCKET_NAME=$BucketName,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres" `
+    --set-env-vars="GCS_BUCKET_NAME=$BucketName,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres,UBER_EMAIL=uber.india@letzryd.com,SHEET_ID=$($env:SHEET_ID)" `
     --set-secrets="PG_PASSWORD=PG_PASSWORD:latest,UBER_PASSWORD=UBER_PASSWORD:latest,SMTP_PASSWORD=SMTP_PASSWORD:latest"
 
 # 8. Create / Update Cloud Scheduler

@@ -273,10 +273,12 @@ def save_cached_org_uuid(code: str, uuid: str):
 
 # ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
 # DO NOT hardcode credentials here — inject via Secret Manager in deploy_gcp.sh
-UBER_EMAIL    = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")  # email is fine to default
-UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")                     # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
-SHEET_ID      = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
-SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+UBER_EMAIL    = os.getenv("UBER_EMAIL", "")      # Set via: --set-env-vars UBER_EMAIL=...
+UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")   # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
+SHEET_ID      = os.getenv("SHEET_ID", "")        # Set via: --set-env-vars SHEET_ID=...
+if not UBER_EMAIL:
+    raise RuntimeError("UBER_EMAIL environment variable is required but not set.")
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0" if SHEET_ID else ""
 
 
 def get_current_sheet_state():
@@ -425,15 +427,17 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
     time.sleep(2)
     dismiss_banner(page)
 
-    if "supplier.uber.com" in page.url and "/orgs/" in page.url and not is_login_required(page):
+    # Bug 1 Fix: any valid supplier page (not just /orgs/) confirms active session
+    if "supplier.uber.com" in page.url and not is_login_required(page):
         Log.ok(f"Active session confirmed on {page.url}")
         save_session_state(context)
         return True
 
     Log.step("AUTH", "Automated Uber Login Engine (Password / SMS OTP / Google OAuth)...")
 
-    # If not on auth/login page, navigate to supplier login entrypoint
-    if not is_login_required(page):
+    # Only navigate to login page if currently on an auth/login page or unknown page.
+    # Do NOT navigate away from a valid supplier page — that would drop the session.
+    if not is_login_required(page) and "supplier.uber.com" not in page.url:
         try:
             page.goto("https://supplier.uber.com/login", timeout=30000, wait_until="domcontentloaded")
             time.sleep(4)
@@ -567,11 +571,14 @@ def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previ
                     time.sleep(4)
                     dismiss_banner(main_page)
 
-            if f"/orgs/{org_uuid}" in main_page.url or not is_login_required(main_page):
+            # Bug 2 Fix: require the correct org UUID in the URL — not just any non-login page
+            if f"/orgs/{org_uuid}" in main_page.url:
                 exp_btn = main_page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
                 if exp_btn.is_visible(timeout=8000):
                     Log.ok(f"Direct URL verified for {city} via Org UUID ({org_uuid})!")
                     return main_page
+                else:
+                    Log.warn(f"On correct org URL but Export button not visible for {city} — falling through to UI Switcher.")
         except Exception as e:
             Log.warn(f"Direct navigation note: {e}")
             main_page = ensure_main_page(context, main_page)
@@ -806,8 +813,9 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
             Log.info(f"🔍 Plate Sanity Check ({city}): Sample plates -> {sample_plates}")
             return dest_csv
         except Exception as e:
-            Log.warn(f"Excel conversion note: {e}")
-            return dest_csv
+            # Bug 4 Fix Part A: return None — do NOT return the unreadable corrupt path
+            Log.err(f"CSV read/Excel conversion failed for {city}: {e} — treating as failed export.")
+            return None
 
     Log.warn(f"Timed out after {max_wait}s waiting for {city} export.")
     return None
@@ -915,46 +923,64 @@ def main():
             previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
 
             for i, target in enumerate(TARGET_CITIES):
-                main_page = switch_to_city(context, main_page, target, previous_orgs)
-                time.sleep(2)
-                # ── 1 Clean page refresh + 7s DOM stabilization (Fix #6) ────────────
-                Log.info(f"Performing 1 clean page refresh for {target['city']}...")
+                city_name = target["city"]
                 try:
-                    main_page.reload(wait_until="domcontentloaded", timeout=30000)
-                    Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
-                    time.sleep(7)
-                    Log.ok(f"  DOM fully hydrated and ready!")
-                    # ── Post-reload session guard ─────────────────────────────────
-                    if "auth.uber.com" in main_page.url:
-                        Log.warn(f"Session dropped during {target['city']} reload! Re-logging in...")
-                        if ensure_login(main_page, context):
-                            org_uuid = target.get("org_uuid", "")
-                            if org_uuid:
-                                main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions",
-                                               timeout=30000, wait_until="domcontentloaded")
-                                time.sleep(5)
-                    # ─────────────────────────────────────────────────────────────
-                except Exception as e:
-                    Log.warn(f"  Refresh note: {e}")
-                    time.sleep(3)
-
-                # Reset download state so previous city's late event is not picked up
-                download_state["latest_file"] = None
-                csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
-                if csv_path and csv_path.exists():
+                    main_page = switch_to_city(context, main_page, target, previous_orgs)
+                    time.sleep(2)
+                    # ── 1 Clean page refresh + 7s DOM stabilization ──────────────────
+                    Log.info(f"Performing 1 clean page refresh for {city_name}...")
                     try:
-                        df = pd.read_csv(csv_path)
-                        df["City"] = target["city"]
-                        all_city_dfs.append(df)
+                        main_page.reload(wait_until="domcontentloaded", timeout=30000)
+                        Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
+                        time.sleep(7)
+                        Log.ok(f"  DOM fully hydrated and ready!")
+                        # ── Post-reload session guard ──────────────────────────────
+                        if is_login_required(main_page):
+                            Log.warn(f"Session dropped during {city_name} reload! Re-logging in...")
+                            if ensure_login(main_page, context):
+                                org_uuid = target.get("org_uuid", "")
+                                if org_uuid:
+                                    main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions",
+                                                   timeout=30000, wait_until="domcontentloaded")
+                                    time.sleep(5)
+                        # ───────────────────────────────────────────────────────────
                     except Exception as e:
-                        Log.err(f"Failed to read CSV for {target['city']}: {e}")
-                        raise e
-                    # Record this city's org UUID so next city can't use it
-                    if target.get("org_uuid"):
-                        previous_orgs.add(target["org_uuid"])
+                        Log.warn(f"  Refresh note: {e}")
+                        time.sleep(3)
+
+                    # Reset download state so previous city's late event is not picked up
+                    download_state["latest_file"] = None
+                    # Bug 5 Fix: save original main_page reference before export popup might open
+                    original_main_page = main_page
+                    csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
+                    main_page = ensure_main_page(context, original_main_page)
+
+                    # Bug 4 Fix: no raise e — log CSV failure and skip this city gracefully
+                    if csv_path and csv_path.exists():
+                        try:
+                            df = pd.read_csv(csv_path)
+                            df["City"] = city_name
+                            all_city_dfs.append(df)
+                            Log.ok(f"✅ {city_name}: {len(df):,} rows collected.")
+                            # Record this city's org UUID so next city can't use it
+                            if target.get("org_uuid"):
+                                previous_orgs.add(target["org_uuid"])
+                        except Exception as e:
+                            Log.err(f"Failed to read CSV for {city_name}: {e} — skipping this city's data.")
+                    else:
+                        Log.warn(f"No CSV produced for {city_name} — skipping.")
+
+                except Exception as e:
+                    # Bug 3 Fix: per-city isolation — one city failure does NOT abort remaining cities
+                    Log.err(f"City {city_name} failed with error: {e}. Continuing with remaining cities...")
+                    try:
+                        main_page = ensure_main_page(context, main_page)
+                    except Exception:
+                        pass
+
                 # 20s cooldown between cities so popup tabs fully close and network settles
                 if i < len(TARGET_CITIES) - 1:
-                    Log.info(f"Cooldown: 20s after {target['city']} download before proceeding...")
+                    Log.info(f"Cooldown: 20s after {city_name} before proceeding...")
                     for s in range(20, 0, -5):
                         Log.info(f"  Cooldown: {s}s remaining...")
                         time.sleep(5)

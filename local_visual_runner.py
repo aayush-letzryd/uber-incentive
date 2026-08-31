@@ -71,7 +71,21 @@ def cleanup_locks():
 
 
 def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
-    # Safely close any extra popup tabs
+    """Recover main_page if closed — does NOT close popup tabs (they may have active downloads)."""
+    if main_page is not None and not main_page.is_closed():
+        return main_page
+
+    pages = [p for p in context.pages if not p.is_closed()]
+    if pages:
+        for p in pages:
+            if "supplier.uber.com" in p.url:
+                return p
+        return pages[0]
+    return context.new_page()
+
+
+def close_popup_tabs(context: BrowserContext, main_page: Page):
+    """Close all non-main popup tabs. Call ONLY after download is confirmed complete."""
     for p in list(context.pages):
         if p != main_page:
             try:
@@ -79,15 +93,6 @@ def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
                     p.close()
             except Exception:
                 pass
-    
-    if main_page is None or main_page.is_closed():
-        pages = [p for p in context.pages if not p.is_closed()]
-        if pages:
-            main_page = pages[0]
-        else:
-            main_page = context.new_page()
-    
-    return main_page
 
 
 def dismiss_banner(page: Page):
@@ -335,6 +340,7 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
             if str(download_state["latest_file"]) not in seen_files:
                 if is_valid_incentive_file(download_state["latest_file"]):
                     found_file = download_state["latest_file"]
+                    seen_files.add(str(found_file))  # Bug 10 Fix: update seen_files on listener path too
                     break
 
         # 2. Scan OUT_DIR and USER_DL_DIR — catch .csv AND UUID-named files (no extension)
@@ -377,9 +383,9 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
 
         time.sleep(2)
 
-    # Let any popup tab finish and close
-    time.sleep(3)
-    ensure_main_page(context, main_page)
+    # Download confirmed (or timed out) — NOW safe to close popup tabs
+    time.sleep(2)
+    close_popup_tabs(context, main_page)  # Bug 9 Fix: use close_popup_tabs, not ensure_main_page
 
     if found_file and found_file.exists():
         dest_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"

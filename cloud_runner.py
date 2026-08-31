@@ -52,11 +52,13 @@ STORAGE_STATE_BLOB_NAME = "session/storage_state.json"
 
 # ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
 # DO NOT add hardcoded fallback values here — inject via Secret Manager in deploy_gcp.sh
-PG_HOST     = os.getenv("PG_HOST", "35.200.196.113")
+PG_HOST     = os.getenv("PG_HOST", "")      # Set via: --set-env-vars PG_HOST=... in deploy_gcp.sh
 PG_PORT     = int(os.getenv("PG_PORT", "5432"))
 PG_DATABASE = os.getenv("PG_DATABASE", "postgres")
 PG_USER     = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "")   # Set via: --set-secrets PG_PASSWORD=PG_PASSWORD:latest
+if not PG_HOST and HAS_PG:
+    print("[-] WARNING: PG_HOST not set — database operations will be skipped.")
 
 RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
 

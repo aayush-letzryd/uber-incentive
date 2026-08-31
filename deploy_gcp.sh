@@ -154,7 +154,7 @@ gcloud run jobs deploy "$JOB_NAME" \
     --cpu 2 \
     --task-timeout 3600s \
     --max-retries 0 \
-    --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres" \
+    --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres,UBER_EMAIL=uber.india@letzryd.com,SHEET_ID=${SHEET_ID:-}" \
     --set-secrets="PG_PASSWORD=PG_PASSWORD:latest,UBER_PASSWORD=UBER_PASSWORD:latest,SMTP_PASSWORD=SMTP_PASSWORD:latest"
 
 # 8. Create / Update 4 Cloud Schedulers (IST Timezone)
