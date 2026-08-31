@@ -708,32 +708,18 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
     trigger_time = time.time()
     Log.info(f"Clicking 'Export' button for {city}...")
     try:
-        exp_btn.evaluate("b => b.click()")
+        exp_btn.scroll_into_view_if_needed(timeout=5000)
+        exp_btn.click(timeout=8000)
     except Exception:
-        exp_btn.click(force=True)
-
-    # ── Fix #3: Verify export was actually triggered (toast / button state) ──
-    time.sleep(2)
-    try:
-        confirmed = main_page.locator(
-            'text=/Generating|Processing|Export in progress/'
-        ).or_(
-            main_page.locator('[data-testid*="toast"], [class*="toast"], [role="alert"]')
-        ).first
-        if confirmed.is_visible(timeout=4000):
-            Log.ok(f"✅ Export confirmed — Uber acknowledged the request for {city}.")
-        else:
-            Log.warn(f"No export confirmation toast visible — retrying click once for {city}...")
+        try:
+            exp_btn.evaluate("b => b.click()")
+        except Exception:
             exp_btn.click(force=True)
-            time.sleep(2)
-    except Exception:
-        pass  # Toast check is best-effort — continue polling regardless
-    # ────────────────────────────────────────────────────────────────────────
 
-    Log.ok(f"Export triggered! Monitoring download (up to {max_wait//60} mins)...")
+    Log.ok(f"Export triggered for {city}! Monitoring download (up to {max_wait//60} mins)...")
 
     start_time = time.time()
-    last_log = time.time() - 5  # First log fires at 10s, not 15s (Fix #10)
+    last_log = time.time() - 5
     found_file = None
 
     while time.time() - start_time < max_wait:
@@ -885,8 +871,10 @@ def main():
                     Log.warn(f"Download save_as note: {e}")
 
             context.on("download", on_context_download)
+            context.on("page", lambda p: p.on("download", on_context_download))
 
             main_page = context.pages[0] if context.pages else context.new_page()
+            main_page.on("download", on_context_download)
             
             try:
                 Stealth().apply_stealth_sync(main_page)
