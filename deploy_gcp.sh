@@ -100,9 +100,29 @@ create_or_update_secret() {
     fi
 }
 
-create_or_update_secret "PG_PASSWORD"    "8S5]U3@L^Xz)\FH}"
-create_or_update_secret "UBER_PASSWORD"  "Letzuberp123"
-create_or_update_secret "SMTP_PASSWORD"  "gqnkqlhyrdclrwrn"
+# ── Load secrets from local .env file (NEVER hardcode in this script) ────────
+if [ -f ".env.secrets" ]; then
+    echo "   -> Loading secrets from .env.secrets file..."
+    source .env.secrets
+fi
+
+if [ -z "$PG_PASSWORD" ] || [ -z "$UBER_PASSWORD" ] || [ -z "$SMTP_PASSWORD" ]; then
+    echo ""
+    echo "⚠️  SECRETS REQUIRED: PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD not found."
+    echo "   Create a '.env.secrets' file with:"
+    echo "     PG_PASSWORD=your_pg_password"
+    echo "     UBER_PASSWORD=your_uber_password"
+    echo "     SMTP_PASSWORD=your_smtp_app_password"
+    echo "   OR export them as environment variables before running this script."
+    echo ""
+    read -r -s -p "Enter PG_PASSWORD: " PG_PASSWORD && echo
+    read -r -s -p "Enter UBER_PASSWORD: " UBER_PASSWORD && echo
+    read -r -s -p "Enter SMTP_PASSWORD: " SMTP_PASSWORD && echo
+fi
+
+create_or_update_secret "PG_PASSWORD"   "$PG_PASSWORD"
+create_or_update_secret "UBER_PASSWORD" "$UBER_PASSWORD"
+create_or_update_secret "SMTP_PASSWORD" "$SMTP_PASSWORD"
 echo "✅ Secrets stored in GCP Secret Manager (removed from source code)"
 # ─────────────────────────────────────────────────────────────────────────────
 

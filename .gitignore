@@ -6,8 +6,12 @@ __pycache__/
 # Environment and secrets
 .env
 *.env
-cookies_b64.txt        # base64-encoded session dump — never commit
-*.b64                  # any other base64 credential files
+.env.secrets               # actual secrets — NEVER commit
+cookies.json               # Uber session cookies — NEVER commit
+storage_state.json         # Playwright storage state — NEVER commit
+cookies_b64.txt            # base64-encoded session dump — never commit
+*.b64                      # any other base64 credential files
+org_uuids.json             # discovered org UUIDs cache
 
 # Chrome user profiles
 uber_chrome_profile/
