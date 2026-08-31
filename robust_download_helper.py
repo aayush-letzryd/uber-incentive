@@ -1,10 +1,7 @@
 """
-LETZRYD · LOCAL VISUAL RUNNER (PRODUCTION v4.8)
-===============================================
-- Stable browser lifecycle with popup tab isolation
-- Downloads captured via context.on('download')
-- Sequential processing of Bangalore, Mumbai, Hyderabad
-- Builds Master Consolidated Excel
+LETZRYD · ROBUST LOCAL TEST RUNNER
+===================================
+Tests multi-city switching with permanent main_page reference and popup tab isolation.
 """
 
 import sys, io
@@ -19,7 +16,6 @@ import datetime
 import pandas as pd
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, BrowserContext
-from playwright_stealth import Stealth
 
 BASE = Path(__file__).parent
 PROFILE_DIR = BASE / "uber_chrome_profile"
@@ -70,7 +66,8 @@ def cleanup_locks():
 
 
 def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
-    # Safely close any extra popup tabs
+    """Ensures we always have a live main page, closing any lingering popups."""
+    # Close any extra orphan popup pages
     for p in list(context.pages):
         if p != main_page:
             try:
@@ -111,11 +108,12 @@ def is_valid_incentive_file(file_path: Path) -> bool:
         return False
 
 
-def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict) -> Page:
+def switch_to_city(context: BrowserContext, main_page: Page, target: dict) -> Page:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
     short = target["short_name"]
     acct = target["account_name"]
+    code = target["code"]
     org_uuid = target.get("org_uuid")
 
     print(f"\n=======================================================")
@@ -154,6 +152,7 @@ def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict
                 sw_btn.click()
                 time.sleep(2)
 
+                clicked = False
                 for query in [acct, short, f"SAMVREEDDHI MOBILITY {short}", f"Samvreeddhi Mobility Pvt Ltd {short}"]:
                     opt = main_page.locator(f'text="{query}"').first
                     if opt.is_visible(timeout=1500):
@@ -161,6 +160,7 @@ def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict
                             opt.scroll_into_view_if_needed()
                             opt.click()
                             print(f"✅ Selected {city} ({query}) from UI switcher!")
+                            clicked = True
                             time.sleep(4)
                             break
                         except Exception:
@@ -186,7 +186,7 @@ def switch_to_city_visual(context: BrowserContext, main_page: Page, target: dict
         return ensure_main_page(context, main_page)
 
 
-def export_and_download_visual(context: BrowserContext, main_page: Page, target: dict, download_state: dict) -> Path:
+def export_and_download_city(context: BrowserContext, main_page: Page, target: dict, download_state: dict) -> Path:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
     code = target["code"]
@@ -232,7 +232,7 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
                 found_file = download_state["latest_file"]
                 break
 
-        # 2. Scan OUT_DIR and USER_DL_DIR
+        # 2. Scan OUT_DIR and USER_DL_DIR (exclude partial .crdownload / .tmp)
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
                 for f in search_dir.glob("*.csv"):
@@ -261,8 +261,8 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
 
         time.sleep(2)
 
-    # Let any popup tab finish and close
-    time.sleep(3)
+    # Clean up popup tabs before proceeding
+    time.sleep(2)
     ensure_main_page(context, main_page)
 
     if found_file and found_file.exists():
@@ -280,93 +280,3 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
 
     print(f"\n⚠️ Timed out waiting for {city} export.")
     return None
-
-
-def run():
-    print("===========================================================================")
-    print("   LETZRYD - LOCAL VISUAL RUNNER (PRODUCTION v4.8)")
-    print("===========================================================================")
-
-    cleanup_locks()
-    download_state = {"latest_file": None}
-
-    with sync_playwright() as pw:
-        print("[*] Launching Visible Chromium Browser...")
-        context = pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,
-            viewport={"width": 1440, "height": 900},
-            accept_downloads=True,
-            downloads_path=str(OUT_DIR),
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-            ignore_default_args=["--enable-automation"],
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--no-default-browser-check"
-            ]
-        )
-
-        def on_context_download(download):
-            print(f"\n📥 [CONTEXT DOWNLOAD EVENT] Suggested filename: {download.suggested_filename}")
-            dest = OUT_DIR / download.suggested_filename
-            try:
-                download.save_as(str(dest))
-                download_state["latest_file"] = dest
-                print(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-            except Exception as e:
-                print(f"[*] Save note: {e}")
-
-        context.on("download", on_context_download)
-
-        main_page = context.pages[0] if context.pages else context.new_page()
-
-        try:
-            Stealth().apply_stealth_sync(main_page)
-            print("[+] Stealth mode active")
-        except Exception as e:
-            print(f"[*] Stealth note: {e}")
-
-        if COOKIES_F.exists():
-            cookies = json.loads(COOKIES_F.read_text(encoding="utf-8"))
-            context.add_cookies(cookies)
-            print(f"[+] Loaded {len(cookies)} saved session cookies")
-
-        all_city_dfs = []
-        today = datetime.datetime.now().strftime("%Y%m%d")
-
-        for target in TARGET_CITIES:
-            main_page = switch_to_city_visual(context, main_page, target)
-            time.sleep(2)
-            csv_path = export_and_download_visual(context, main_page, target, download_state)
-            if csv_path and csv_path.exists():
-                try:
-                    df = pd.read_csv(csv_path)
-                    df["City"] = target["city"]
-                    all_city_dfs.append(df)
-                except Exception:
-                    pass
-
-        if all_city_dfs:
-            master_df = pd.concat(all_city_dfs, ignore_index=True)
-            master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"
-            master_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.csv"
-
-            cols = ["City"] + [c for c in master_df.columns if c != "City"]
-            master_df = master_df[cols]
-
-            master_df.to_excel(master_xlsx, index=False)
-            master_df.to_csv(master_csv, index=False)
-
-            print("\n" + "=" * 70)
-            print(f"🎉 MASTER REPORT CREATED: {master_xlsx}")
-            print(f"📊 Total Rows Across All 3 Cities: {len(master_df):,}")
-            print("=" * 70)
-
-        print("\n[*] Execution completed successfully. Closing browser in 10 seconds...")
-        time.sleep(10)
-        context.close()
-
-
-if __name__ == "__main__":
-    run()
