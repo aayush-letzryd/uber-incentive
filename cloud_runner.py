@@ -243,7 +243,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
 
         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
-        rows_to_insert = []
+        rows_dict = {}
         now_ts = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # IST-aware ingested_at
 
         for _, row in df.iterrows():
@@ -262,10 +262,11 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             driver_trip_breakdown = str(row.get("driver_trip_count_breakdown", "")).strip() if pd.notna(row.get("driver_trip_count_breakdown")) else None
 
             if not number_plate or not start_date or not end_date:
-                print(f"  [!] Skipping row — missing plate/start/end: plate={number_plate!r} start={start_date!r} end={end_date!r}")
                 continue
 
-            rows_to_insert.append((
+            # Deduplicate by constraint key to prevent Postgres "ON CONFLICT DO UPDATE cannot affect row a second time" error
+            key = (city, number_plate, start_date, end_date, trip_target)
+            rows_dict[key] = (
                 city,
                 vehicle_name,
                 number_plate,
@@ -279,7 +280,10 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
                 status,
                 driver_trip_breakdown,
                 now_ts
-            ))
+            )
+
+        rows_to_insert = list(rows_dict.values())
+        print(f"[*] Prepared {len(rows_to_insert):,} unique deduplicated records for PostgreSQL (filtered {len(df) - len(rows_to_insert)} duplicates from Uber CSV).")
 
         if not rows_to_insert:
             print("[!] No valid rows prepared for ingestion.")
