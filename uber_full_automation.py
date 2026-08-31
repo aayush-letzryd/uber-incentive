@@ -1,10 +1,10 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.5)
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.6)
 ====================================================================
-1. Uses context.on("download") to capture popup downloads
-2. Validates CSV headers on disk (catches .crdownload immediately)
-3. Switches across Bangalore, Mumbai, and Hyderabad
-4. Generates Excel & Master Report across all 3 cities
+1. Dynamic page lifecycle manager (`get_active_page`)
+2. `context.on("download")` captures popup tab downloads
+3. Instant CSV content validator
+4. Multi-city aggregation across Bangalore, Mumbai, and Hyderabad
 """
 
 import sys, io
@@ -112,6 +112,13 @@ def cleanup_locks():
             except Exception: pass
 
 
+def get_active_page(context: BrowserContext) -> Page:
+    active_pages = [p for p in context.pages if not p.is_closed()]
+    if active_pages:
+        return active_pages[0]
+    return context.new_page()
+
+
 def load_session(context: BrowserContext) -> bool:
     if COOKIES_F.exists():
         try:
@@ -126,10 +133,11 @@ def load_session(context: BrowserContext) -> bool:
 
 def dismiss_banner(page: Page):
     try:
-        banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"]').first
-        if banner_close.is_visible(timeout=1500):
-            banner_close.click()
-            time.sleep(1)
+        if not page.is_closed():
+            banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"]').first
+            if banner_close.is_visible(timeout=1500):
+                banner_close.click()
+                time.sleep(1)
     except Exception:
         pass
 
@@ -145,7 +153,8 @@ def is_valid_incentive_file(file_path: Path) -> bool:
         return False
 
 
-def switch_to_city(page: Page, target: dict) -> bool:
+def switch_to_city(context: BrowserContext, target: dict) -> Page:
+    page = get_active_page(context)
     city = target["city"]
     short = target["short_name"]
     acct = target["account_name"]
@@ -158,18 +167,21 @@ def switch_to_city(page: Page, target: dict) -> bool:
         try:
             page.goto(url, timeout=45000, wait_until="domcontentloaded")
             Log.wait(4, f"Loading {city} promotions page")
+            page = get_active_page(context)
             dismiss_banner(page)
 
             exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
             if exp_btn.is_visible(timeout=5000):
                 Log.ok(f"Direct URL verified for {city}!")
-                return True
+                return page
         except Exception as e:
             Log.warn(f"Direct navigation note: {e}")
+            page = get_active_page(context)
 
     # Fallback to UI switcher
     Log.info(f"Using Account Switcher UI for {city}...")
     try:
+        page = get_active_page(context)
         user_btn = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
         if user_btn.is_visible(timeout=4000):
             user_btn.click()
@@ -196,6 +208,7 @@ def switch_to_city(page: Page, target: dict) -> bool:
                         Log.wait(4, f"Loading {city} dashboard")
                         break
 
+        page = get_active_page(context)
         if "/promotions" not in page.url:
             promo_tab = page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
             if promo_tab.is_visible(timeout=3000):
@@ -203,14 +216,15 @@ def switch_to_city(page: Page, target: dict) -> bool:
                 Log.wait(3, "Opening Promotions tab")
 
         dismiss_banner(page)
-        return True
+        return page
 
     except Exception as e:
         Log.warn(f"Account switch note for {city}: {e}")
-        return False
+        return get_active_page(context)
 
 
-def export_and_download_city(page: Page, context: BrowserContext, target: dict, download_state: dict) -> Path:
+def export_and_download_city(context: BrowserContext, target: dict, download_state: dict) -> Path:
+    page = get_active_page(context)
     city = target["city"]
     code = target["code"]
     kw   = target["file_keyword"]
@@ -248,12 +262,12 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        # Check download event
+        # 1. Check download state from context listener
         if download_state.get("latest_file") and download_state["latest_file"].exists():
             found_file = download_state["latest_file"]
             break
 
-        # Scan OUT_DIR and USER_DL_DIR
+        # 2. Scan OUT_DIR and USER_DL_DIR
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
                 for f in search_dir.glob("*"):
@@ -377,7 +391,7 @@ def main():
 
         context.on("download", on_context_download)
 
-        page = context.pages[0] if context.pages else context.new_page()
+        page = get_active_page(context)
         
         try:
             Stealth().apply_stealth_sync(page)
@@ -391,8 +405,9 @@ def main():
         today = datetime.datetime.now().strftime("%Y%m%d")
 
         for target in TARGET_CITIES:
-            switch_to_city(page, target)
-            csv_path = export_and_download_city(page, context, target, download_state)
+            page = switch_to_city(context, target)
+            time.sleep(2)
+            csv_path = export_and_download_city(context, target, download_state)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
