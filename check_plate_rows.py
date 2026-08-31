@@ -9,7 +9,7 @@ try:
         port=int(os.getenv('PG_PORT', '5432')),
         dbname=os.getenv('PG_DATABASE', 'postgres'),
         user=os.getenv('PG_USER', 'postgres'),
-        password=os.getenv('PG_PASSWORD', r'8S5]U3@L^Xz)\FH}')
+        password=os.getenv('PG_PASSWORD', r'')
     )
     cur = conn.cursor()
 

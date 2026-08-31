@@ -5,7 +5,7 @@ from playwright.sync_api import sync_playwright
 from browser_humanizer import launch_humanized_browser, apply_stealth_and_fingerprints, human_type, human_click
 
 EMAIL = "uber.india@letzryd.com"
-PASSWORD = "Letzuberp123"
+PASSWORD = ""
 START_URL = "https://supplier.uber.com/orgs/e8cf5236-6308-4631-a12c-1969c8da16c7/reports"
 
 def run_setup():

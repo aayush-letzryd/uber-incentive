@@ -8,7 +8,7 @@ import pandas as pd
 from playwright.sync_api import sync_playwright
 
 EMAIL = "uber.india@letzryd.com"
-PASSWORD = "Letzuberp123"
+PASSWORD = ""
 START_URL = "https://supplier.uber.com/orgs/e8cf5236-6308-4631-a12c-1969c8da16c7/reports"
 SHEET_ID = "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"

@@ -9,7 +9,7 @@ DB_CONFIG = {
     "port": "5432",
     "dbname": "postgres",
     "user": "postgres",
-    "password": r"8S5]U3@L^Xz)\FH}"
+    "password": r""
 }
 
 try:

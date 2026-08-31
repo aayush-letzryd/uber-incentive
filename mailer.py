@@ -14,7 +14,7 @@ from pathlib import Path
 SMTP_SERVER   = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT     = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER     = os.getenv("SMTP_USER", "vendor_aayush@letzryd.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "gqnk qlhy rdcl rwrn".replace(" ", ""))
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 DEFAULT_RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
 
 

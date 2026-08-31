@@ -2,14 +2,15 @@ import sys, io
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
+import os
 import psycopg2
 
 DB_CONFIG = {
-    "host": "35.200.196.113",
-    "port": "5432",
-    "dbname": "postgres",
-    "user": "postgres",
-    "password": r"8S5]U3@L^Xz)\FH}"
+    "host": os.getenv("PG_HOST", "35.200.196.113"),
+    "port": int(os.getenv("PG_PORT", "5432")),
+    "dbname": os.getenv("PG_DATABASE", "postgres"),
+    "user": os.getenv("PG_USER", "postgres"),
+    "password": os.getenv("PG_PASSWORD", "")
 }
 
 CREATE_TABLES_SQL = """

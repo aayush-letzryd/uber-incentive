@@ -12,7 +12,7 @@ DB_CONFIG = {
     "port": "5432",
     "dbname": "postgres",
     "user": "postgres",
-    "password": r"8S5]U3@L^Xz)\FH}"
+    "password": r""
 }
 
 blr_file = Path(r"C:\Users\anura\Downloads\20260824-20260831-vehicle_incentives-SAMVREEDDHI_MOBILITY_Pvt_Ltd_BLR_P.csv")
