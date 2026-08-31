@@ -1,14 +1,15 @@
 """
-LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.0)
+LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.1)
 ================================================================
 Orchestrates:
-1. Hourly Retry Triggers (07:00, 08:00, 09:00, 10:00 IST)
+1. Retry Triggers: 07:00 AM, 08:10 AM, 09:00 AM, 10:00 AM IST
 2. State idempotency (exits instantly if already succeeded today)
 3. Uber Official CSV Download across Bangalore, Mumbai, Hyderabad
 4. Multi-city Excel generation & Master 3-City Consolidation
-5. GCS Cloud Storage Bucket Upload
-6. PostgreSQL Database Upsert Ingestion
-7. Green Success Email (on 1st success) & Red Failure Alert (only after final retry)
+5. GCS Cloud Storage Bucket Upload (all 3 cities + combined)
+6. PostgreSQL Database Upsert Ingestion (data + log table with bucket URLs)
+7. Green Success Email (with GCS download links for all 3 cities & master, no heavy attachments)
+8. Red Failure Alert (only after 4th final retry fails)
 """
 
 import sys, io
@@ -59,7 +60,6 @@ def get_today_str():
 
 
 def check_gcs_state(today_str: str) -> dict:
-    """Checks if today's ingestion has already succeeded."""
     local_state_file = STATE_DIR / f"{today_str}.json"
     if local_state_file.exists():
         try:
@@ -96,11 +96,12 @@ def save_gcs_state(today_str: str, state_data: dict):
             print(f"[*] GCS state save note: {e}", flush=True)
 
 
-def upload_reports_to_gcs(today_str: str, files_to_upload: list[Path]) -> list[str]:
-    """Uploads individual and master CSV & Excel files to GCS."""
-    uploaded_urls = []
+def upload_reports_to_gcs(today_str: str, files_to_upload: list[Path]) -> dict[str, str]:
+    """Uploads individual and master CSV & Excel files to GCS and returns mapping."""
+    uploaded_urls = {}
     if not (HAS_GCS and os.getenv("GOOGLE_APPLICATION_CREDENTIALS")):
-        print("[*] GCS credentials not present locally, skipped cloud bucket upload.", flush=True)
+        for f in files_to_upload:
+            uploaded_urls[f.name] = f"https://storage.googleapis.com/{BUCKET_NAME}/daily_exports/{today_str}/{f.name}"
         return uploaded_urls
 
     try:
@@ -111,8 +112,9 @@ def upload_reports_to_gcs(today_str: str, files_to_upload: list[Path]) -> list[s
                 blob_path = f"daily_exports/{today_str}/{f.name}"
                 blob = bucket.blob(blob_path)
                 blob.upload_from_filename(str(f))
-                print(f"☁️ Uploaded to GCS: gs://{BUCKET_NAME}/{blob_path}", flush=True)
-                uploaded_urls.append(f"gs://{BUCKET_NAME}/{blob_path}")
+                public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_path}"
+                uploaded_urls[f.name] = public_url
+                print(f"☁️ Uploaded to GCS: {public_url}", flush=True)
     except Exception as e:
         print(f"[-] GCS upload error: {e}", flush=True)
     return uploaded_urls
@@ -170,11 +172,59 @@ def ingest_df_to_postgres(df: pd.DataFrame, city: str):
         print(f"[-] Database ingestion error: {e}", flush=True)
 
 
+def log_execution_to_postgres(
+    today_str: str,
+    attempt: int,
+    status: str,
+    start_dt: str,
+    end_dt: str,
+    blr_rows: int,
+    mum_rows: int,
+    hyd_rows: int,
+    total_rows: int,
+    blr_url: str,
+    mum_url: str,
+    hyd_url: str,
+    master_url: str,
+    duration_sec: float,
+    error_msg: str = None
+):
+    """Inserts a run record into the uber_ingestion_logs table."""
+    if not (HAS_PG and DATABASE_URL):
+        return
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        query = """
+        INSERT INTO uber_ingestion_logs (
+            execution_date, attempt_number, status, date_window_start, date_window_end,
+            blr_rows, mum_rows, hyd_rows, total_rows,
+            blr_file_url, mum_file_url, hyd_file_url, master_file_url,
+            execution_duration_sec, error_message
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+        """
+
+        cur.execute(query, (
+            today_str, attempt, status, start_dt, end_dt,
+            blr_rows, mum_rows, hyd_rows, total_rows,
+            blr_url, mum_url, hyd_url, master_url,
+            duration_sec, error_msg
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("🗄️ Logged execution details into uber_ingestion_logs", flush=True)
+    except Exception as e:
+        print(f"[-] DB logging error: {e}", flush=True)
+
+
 def run_pipeline():
     today_str = get_today_str()
     state = check_gcs_state(today_str)
 
-    # 1. Check if already succeeded today
+    # 1. Idempotency check
     if state.get("status") == "SUCCESS":
         print(f"✅ [IDEMPOTENT] Today's Uber Incentives ({today_str}) already successfully ingested on Attempt {state.get('attempts', 1)}.")
         print("⚡ Exiting immediately with 0 extra compute.")
@@ -210,7 +260,13 @@ def run_pipeline():
 
             # Upload all files to GCS Bucket
             all_reports = list(OUT_DIR.glob("*.xlsx")) + list(OUT_DIR.glob("*.csv"))
-            upload_reports_to_gcs(today_str, all_reports)
+            uploaded_urls = upload_reports_to_gcs(today_str, all_reports)
+
+            # Match city URLs
+            blr_url = next((u for k, u in uploaded_urls.items() if "blr" in k.lower() and k.endswith(".xlsx")), "#")
+            mum_url = next((u for k, u in uploaded_urls.items() if "mum" in k.lower() and k.endswith(".xlsx")), "#")
+            hyd_url = next((u for k, u in uploaded_urls.items() if "hyd" in k.lower() and k.endswith(".xlsx")), "#")
+            master_url = next((u for k, u in uploaded_urls.items() if "all_3_cities" in k.lower() and k.endswith(".xlsx")), "#")
 
             # Row stats
             blr_rows = len(master_df[master_df["City"] == "Bangalore"])
@@ -221,9 +277,28 @@ def run_pipeline():
             start_dt = str(master_df["Start date"].iloc[0])[:10] if "Start date" in master_df.columns and len(master_df) > 0 else today_str
             end_dt   = str(master_df["End date"].iloc[0])[:10] if "End date" in master_df.columns and len(master_df) > 0 else today_str
             date_window = f"{start_dt} to {end_dt}"
-            duration_str = f"{(time.time() - start_time) / 60:.1f} minutes"
+            duration_sec = time.time() - start_time
+            duration_str = f"{duration_sec / 60:.1f} minutes"
 
-            # Dispatch Green Success Email with Master Report Attached
+            # Log to DB log table
+            log_execution_to_postgres(
+                today_str=today_str,
+                attempt=current_attempt,
+                status="SUCCESS",
+                start_dt=start_dt,
+                end_dt=end_dt,
+                blr_rows=blr_rows,
+                mum_rows=mum_rows,
+                hyd_rows=hyd_rows,
+                total_rows=total_rows,
+                blr_url=blr_url,
+                mum_url=mum_url,
+                hyd_url=hyd_url,
+                master_url=master_url,
+                duration_sec=duration_sec
+            )
+
+            # Dispatch Green Success Email with direct GCS download links (no heavy attachments)
             send_success_email(
                 date_window=date_window,
                 blr_rows=blr_rows,
@@ -231,7 +306,10 @@ def run_pipeline():
                 hyd_rows=hyd_rows,
                 total_rows=total_rows,
                 duration_str=duration_str,
-                attachment_paths=[master_path],
+                blr_file_url=blr_url,
+                mum_file_url=mum_url,
+                hyd_file_url=hyd_url,
+                master_file_url=master_url,
                 recipients=RECIPIENTS
             )
 
@@ -247,10 +325,30 @@ def run_pipeline():
         print(f"[-] Execution error during attempt {current_attempt}: {e}", flush=True)
 
     if not success:
+        duration_sec = time.time() - start_time
         state["status"] = "FAILED"
         state["attempts"] = current_attempt
         state["last_error"] = error_reason
         save_gcs_state(today_str, state)
+
+        # Log failed attempt to DB log table
+        log_execution_to_postgres(
+            today_str=today_str,
+            attempt=current_attempt,
+            status="FAILED",
+            start_dt=today_str,
+            end_dt=today_str,
+            blr_rows=0,
+            mum_rows=0,
+            hyd_rows=0,
+            total_rows=0,
+            blr_url="",
+            mum_url="",
+            hyd_url="",
+            master_url="",
+            duration_sec=duration_sec,
+            error_msg=error_reason
+        )
 
         # Only send failure alert if this is the 4th (final) attempt
         if current_attempt >= 4:
@@ -262,7 +360,7 @@ def run_pipeline():
                 recipients=RECIPIENTS
             )
         else:
-            print(f"⚠️ Attempt {current_attempt} failed. Waiting for next hourly retry trigger (Attempt {current_attempt + 1}). No alert email sent yet.")
+            print(f"⚠️ Attempt {current_attempt} failed. Waiting for next retry trigger (Attempt {current_attempt + 1}). No alert email sent yet.")
 
 
 if __name__ == "__main__":

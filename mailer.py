@@ -7,7 +7,6 @@ import smtplib
 import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
 from pathlib import Path
 
 # SMTP CONFIGURATION
@@ -25,18 +24,21 @@ def send_success_email(
     hyd_rows: int,
     total_rows: int,
     duration_str: str,
-    attachment_paths: list[Path] = None,
-    gcs_download_url: str = "#",
+    blr_file_url: str = "#",
+    mum_file_url: str = "#",
+    hyd_file_url: str = "#",
+    master_file_url: str = "#",
     recipients: list[str] = None
 ) -> bool:
     """
-    Sends LetzRyd branded Green Success Email matching fleet operations standard template.
+    Sends LetzRyd branded Green Success Email with cloud bucket download links for all 3 cities & Master report.
+    No heavy attachments - all files downloadable via GCS links.
     """
     if recipients is None:
         recipients = DEFAULT_RECIPIENTS
 
-    msg = MIMEMultipart("related")
-    subject = f"✅ [SUCCESS] LetzRyd Uber Incentives Ingested ({date_window})"
+    msg = MIMEMultipart("alternative")
+    subject = f"✅ [SUCCESS] LetzRyd Uber Statement Ingested ({date_window})"
     msg["Subject"] = subject
     msg["From"] = f"LetzRyd Uber Automation <{SMTP_USER}>"
     msg["To"] = ", ".join(recipients)
@@ -112,7 +114,7 @@ def send_success_email(
     border: 1px solid #bbf7d0;
     border-radius: 10px;
     padding: 18px 22px;
-    margin-bottom: 26px;
+    margin-bottom: 24px;
   }}
   .val-badge {{
     background: #d1fae5;
@@ -122,20 +124,55 @@ def send_success_email(
     font-weight: 700;
     font-size: 12px;
   }}
-  .btn-container {{
-    text-align: center;
-    margin: 25px 0 15px;
+  .downloads-card {{
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 25px;
   }}
-  .btn {{
-    display: inline-block;
+  .dl-title {{
+    font-size: 13px;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }}
+  .dl-row {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+  }}
+  .dl-row:last-child {{
+    border-bottom: none;
+  }}
+  .dl-link {{
+    color: #047857;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 12px;
+    background: #e6f4ea;
+    padding: 4px 10px;
+    border-radius: 6px;
+  }}
+  .dl-link:hover {{
+    background: #cbf0d7;
+  }}
+  .btn-master {{
+    display: block;
     background: #047857;
     color: #ffffff !important;
     text-decoration: none;
+    text-align: center;
     font-size: 14px;
     font-weight: 700;
-    padding: 12px 28px;
+    padding: 12px 20px;
     border-radius: 8px;
-    box-shadow: 0 2px 6px rgba(4,120,87,0.3);
+    margin: 15px 0 5px;
+    box-shadow: 0 2px 6px rgba(4,120,87,0.25);
   }}
   .footer {{
     background: #f9fafb;
@@ -155,8 +192,8 @@ def send_success_email(
     </div>
     <div class="content">
       <span class="badge">STATUS: SUCCESSFUL</span>
-      <h2>Uber Vehicle Incentives Ingestion Completed</h2>
-      <div class="subtitle">All vehicle incentive records successfully downloaded, consolidated, and ingested into PostgreSQL.</div>
+      <h2>Uber Statement Ingestion Completed</h2>
+      <div class="subtitle">All ride and incentive ledger records successfully loaded into PostgreSQL and Cloud Storage.</div>
       
       <div class="summary-card">
         <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
@@ -165,15 +202,15 @@ def send_success_email(
             <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{date_window}</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
-            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Bangalore (BLR P):</td>
+            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Bangalore Ingested:</td>
             <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{blr_rows:,} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
-            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Mumbai (MUM P):</td>
+            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Mumbai Ingested:</td>
             <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{mum_rows:,} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
-            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Hyderabad (HYD P):</td>
+            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Hyderabad Ingested:</td>
             <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{hyd_rows:,} records</td>
           </tr>
           <tr style="border-bottom: 1px dashed #dcfce7;">
@@ -184,19 +221,31 @@ def send_success_email(
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Execution Duration:</td>
             <td style="padding: 7px 0; color: #111827; font-weight: 700; text-align: right;">{duration_str}</td>
           </tr>
-          <tr style="border-bottom: 1px dashed #dcfce7;">
+          <tr>
             <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Database Status:</td>
             <td style="padding: 7px 0; text-align: right;"><span class="val-badge">ACTIVE & COMMITTED</span></td>
-          </tr>
-          <tr>
-            <td style="padding: 7px 0; color: #4b5563; font-weight: 500;">Cloud Storage Bucket:</td>
-            <td style="padding: 7px 0; text-align: right;"><span class="val-badge">SYNCED & PERSISTED</span></td>
           </tr>
         </table>
       </div>
 
-      <div class="btn-container">
-        <a href="{gcs_download_url}" class="btn">📥 Download Master Report (.xlsx)</a>
+      <div class="downloads-card">
+        <div class="dl-title">📂 Cloud Storage Statements (.xlsx)</div>
+        <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
+          <tr style="border-bottom: 1px solid #f1f5f9;">
+            <td style="padding: 6px 0; color: #334155; font-weight: 600;">Bangalore Fleet</td>
+            <td style="padding: 6px 0; text-align: right;"><a href="{blr_file_url}" class="dl-link">Download .xlsx</a></td>
+          </tr>
+          <tr style="border-bottom: 1px solid #f1f5f9;">
+            <td style="padding: 6px 0; color: #334155; font-weight: 600;">Mumbai Fleet</td>
+            <td style="padding: 6px 0; text-align: right;"><a href="{mum_file_url}" class="dl-link">Download .xlsx</a></td>
+          </tr>
+          <tr style="border-bottom: 1px solid #f1f5f9;">
+            <td style="padding: 6px 0; color: #334155; font-weight: 600;">Hyderabad Fleet</td>
+            <td style="padding: 6px 0; text-align: right;"><a href="{hyd_file_url}" class="dl-link">Download .xlsx</a></td>
+          </tr>
+        </table>
+        
+        <a href="{master_file_url}" class="btn-master">📥 Download Combined Master Statement (.xlsx)</a>
       </div>
     </div>
     
@@ -210,14 +259,6 @@ def send_success_email(
 </html>"""
 
     msg.attach(MIMEText(html_content, "html"))
-
-    if attachment_paths:
-        for p in attachment_paths:
-            if p.exists():
-                with open(p, "rb") as f:
-                    part = MIMEApplication(f.read(), Name=p.name)
-                    part["Content-Disposition"] = f'attachment; filename="{p.name}"'
-                    msg.attach(part)
 
     try:
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
@@ -243,7 +284,7 @@ def send_failure_email(
     if recipients is None:
         recipients = DEFAULT_RECIPIENTS
 
-    msg = MIMEMultipart("related")
+    msg = MIMEMultipart("alternative")
     subject = f"⚠️ [ALERT] LetzRyd Uber Ingestion Failed ({date_window})"
     msg["Subject"] = subject
     msg["From"] = f"LetzRyd Uber Automation <{SMTP_USER}>"
@@ -349,8 +390,8 @@ def send_failure_email(
     </div>
     <div class="content">
       <span class="badge-red">STATUS: ACTION REQUIRED</span>
-      <h2>Uber Vehicle Incentives Ingestion Incomplete</h2>
-      <div class="subtitle">The automated pipeline was unable to secure export statements from Uber after all {attempts_count} scheduled retry attempts.</div>
+      <h2>Uber Statement Ingestion Incomplete</h2>
+      <div class="subtitle">The automated pipeline was unable to secure statements from Uber after all {attempts_count} scheduled retry attempts.</div>
       
       <div class="summary-card-red">
         <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
