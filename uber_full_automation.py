@@ -115,6 +115,25 @@ def cleanup_locks():
 
 
 def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
+    """Recover main_page if it's closed. Does NOT close popup tabs during export
+    (they may have active downloads in progress)."""
+    if main_page is not None and not main_page.is_closed():
+        return main_page
+
+    # main_page is gone — recover from remaining open pages
+    pages = [p for p in context.pages if not p.is_closed()]
+    if pages:
+        # Prefer a supplier.uber.com page
+        for p in pages:
+            if "supplier.uber.com" in p.url:
+                return p
+        return pages[0]
+
+    return context.new_page()
+
+
+def close_popup_tabs(context: BrowserContext, main_page: Page):
+    """Explicitly close all non-main popup tabs. Call ONLY after download is confirmed complete."""
     for p in list(context.pages):
         if p != main_page:
             try:
@@ -122,15 +141,6 @@ def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
                     p.close()
             except Exception:
                 pass
-    
-    if main_page is None or main_page.is_closed():
-        pages = [p for p in context.pages if not p.is_closed()]
-        if pages:
-            main_page = pages[0]
-        else:
-            main_page = context.new_page()
-    
-    return main_page
 
 
 def load_session(context: BrowserContext) -> bool:
@@ -145,10 +155,11 @@ def load_session(context: BrowserContext) -> bool:
         except Exception as e:
             Log.warn(f"Cookie load note: {e}")
 
-    if STATE_F.exists():
+    if STATE_F.exists() and not loaded:
+        # Only load from storage_state if cookies.json had nothing — avoids duplicates
         try:
             state_data = json.loads(STATE_F.read_text(encoding="utf-8"))
-            if isinstance(state_data, dict) and "cookies" in state_data:
+            if isinstance(state_data, dict) and "cookies" in state_data and state_data["cookies"]:
                 context.add_cookies(state_data["cookies"])
                 Log.ok(f"Loaded {len(state_data['cookies'])} session cookies from {STATE_F.name}")
                 loaded = True
@@ -162,18 +173,22 @@ def is_login_required(page: Page) -> bool:
     """Checks whether the current page is an authentication / login challenge."""
     try:
         url = page.url.lower()
+        # Must be on a known auth domain — not just any page containing /login in path
         if any(auth_term in url for auth_term in [
             "auth.uber.com", "login.uber.com", "accounts.google.com",
-            "/login", "/sign-in", "action=signin", "openid", "identity"
         ]):
             return True
-        # Check if page has email/phone input or sign in buttons
+        # supplier.uber.com/login (exact login path, not /orgs/xxx/settings-login)
+        if "supplier.uber.com/login" in url or "supplier.uber.com/sign-in" in url:
+            return True
+        # Check for auth-specific UI elements (avoid false positives from OTP inputs on dashboard)
+        # Only check for email/phone login forms, not general input[type=email]
         auth_loc = page.locator(
-            'input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"], input[type="email"], '
-            'button:has-text("Continue with Google"), a[href*="/login"], button:has-text("Log in"), '
-            'button:has-text("Sign in"), input[type="password"]'
+            'input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"][placeholder*="phone"], '
+            'button:has-text("Continue with Google"), '
+            'h1:has-text("Sign in"), h1:has-text("Log in"), h1:has-text("Welcome back")'
         ).first
-        if auth_loc.is_visible(timeout=1500):
+        if auth_loc.is_visible(timeout=1000):
             return True
     except Exception:
         pass
@@ -770,9 +785,9 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
 
         time.sleep(2)
 
-    # Let any popup tab finish and close cleanly
-    time.sleep(3)
-    ensure_main_page(context, main_page)
+    # Download is confirmed (or timed out) — NOW it is safe to close popup tabs
+    time.sleep(2)
+    close_popup_tabs(context, main_page)
 
     if found_file and found_file.exists():
         dest_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"

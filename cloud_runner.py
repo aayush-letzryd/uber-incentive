@@ -199,14 +199,24 @@ def clean_num(val, default=0.0):
         return default
 
 
+
 def clean_timestamp(val):
+    """Parse Uber date strings (DD/MM/YYYY or YYYY-MM-DD) into ISO timestamp string for PostgreSQL."""
     if pd.isna(val) or val is None or str(val).strip() in ("", "-", "NA", "nan", "NaN"):
         return None
     try:
-        ts = pd.to_datetime(val, errors='coerce', dayfirst=True)
+        s = str(val).strip()
+        # Try strict DD/MM/YYYY first (Uber India format e.g. "01/09/2026")
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
+            try:
+                return datetime.datetime.strptime(s[:10], fmt).strftime("%Y-%m-%d 00:00:00")
+            except ValueError:
+                continue
+        # Fallback to pandas parser
+        ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
         if pd.isna(ts):
             return None
-        return ts.strftime('%Y-%m-%d %H:%M:%S')
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
 
@@ -217,6 +227,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         print("[-] DB connection unavailable; skipping ingestion.")
         return 0
 
+    IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
     cur = None
     try:
         df = pd.read_excel(master_xlsx_path)
@@ -225,7 +236,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
         rows_to_insert = []
-        now_ts = datetime.datetime.now()
+        now_ts = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # IST-aware ingested_at
 
         for _, row in df.iterrows():
             city = str(row.get("city", "")).strip() or "Unknown"
@@ -233,7 +244,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             number_plate = str(row.get("number_plate", "")).strip()
             start_date = clean_timestamp(row.get("start_date"))
             end_date = clean_timestamp(row.get("end_date"))
-            
+
             acceptance_rate = clean_num(row.get("acceptance_rate"), default=None)
             target_acceptance_rate = clean_num(row.get("target_acceptance_rate"), default=None)
             trips_completed = int(clean_num(row.get("trips_completed"), 0))
@@ -243,6 +254,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             driver_trip_breakdown = str(row.get("driver_trip_count_breakdown", "")).strip() if pd.notna(row.get("driver_trip_count_breakdown")) else None
 
             if not number_plate or not start_date or not end_date:
+                print(f"  [!] Skipping row — missing plate/start/end: plate={number_plate!r} start={start_date!r} end={end_date!r}")
                 continue
 
             rows_to_insert.append((
@@ -435,17 +447,20 @@ def run_pipeline():
         if total_rows == 0:
             raise RuntimeError("Generated Master Excel is empty (0 rows).")
 
-        # ── Fix #5: Extract real date window from CSV data (not just today_str) ──
+        # ── Extract real date window from CSV data (DD/MM/YYYY Uber India format) ──
         date_window_start = today_str
         date_window_end = today_str
         try:
-            df_cols = [c.strip().lower() for c in master_df.columns]
             start_col = next((c for c in master_df.columns if "start" in c.lower() and "date" in c.lower()), None)
             end_col   = next((c for c in master_df.columns if "end" in c.lower() and "date" in c.lower()), None)
             if start_col:
-                date_window_start = str(pd.to_datetime(master_df[start_col], errors="coerce").min().date())
+                parsed = pd.to_datetime(master_df[start_col], errors="coerce", dayfirst=True)
+                if not parsed.dropna().empty:
+                    date_window_start = str(parsed.min().date())
             if end_col:
-                date_window_end   = str(pd.to_datetime(master_df[end_col],   errors="coerce").max().date())
+                parsed = pd.to_datetime(master_df[end_col], errors="coerce", dayfirst=True)
+                if not parsed.dropna().empty:
+                    date_window_end = str(parsed.max().date())
             print(f"[*] Date Window: {date_window_start} → {date_window_end}")
         except Exception as e:
             print(f"[!] Date window parse note: {e} — using today_str as fallback")
@@ -500,7 +515,7 @@ def run_pipeline():
 
         state["status"] = "SUCCESS"
         state["attempts"] = current_attempt
-        state["completed_at"] = datetime.datetime.now().isoformat()
+        state["completed_at"] = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
         save_gcs_state(today_str, state)
         success = True
 
