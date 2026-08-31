@@ -63,6 +63,9 @@ if ($LASTEXITCODE -ne 0) {
     gsutil mb -p $ProjectId -l $Region -b on "gs://$BucketName"
     Write-Host "[+] Bucket created: gs://$BucketName" -ForegroundColor Green
 }
+gcloud storage buckets add-iam-policy-binding "gs://$BucketName" `
+    --member="allUsers" `
+    --role="roles/storage.objectViewer" 2>$null
 
 # 4. Sync Initial Cookies to GCS
 if (Test-Path "cookies.json") {

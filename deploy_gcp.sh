@@ -73,6 +73,12 @@ else
     echo "✅ Bucket already exists: gs://$BUCKET_NAME"
 fi
 
+# Grant public read access on bucket so operations email download links work directly
+gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" \
+    --member="allUsers" \
+    --role="roles/storage.objectViewer" >/dev/null 2>&1 || true
+echo "✅ Public download access configured for reports bucket: gs://$BUCKET_NAME"
+
 # 4. Upload initial auth cookies to bucket if available
 if [ -f "cookies.json" ]; then
     gsutil cp cookies.json "gs://$BUCKET_NAME/session/cookies.json" >/dev/null 2>&1 || true
