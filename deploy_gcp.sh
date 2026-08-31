@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# LETZRYD · UBER INCENTIVES GCP CLOUD SHELL DEPLOYMENT SCRIPT (PRODUCTION v4.2)
-# Sets up: GCS Bucket, IAM Roles, Cloud Run Job (Headless Playwright), and Cloud Schedulers
+# LETZRYD · UBER INCENTIVES GCP CLOUD SHELL DEPLOYMENT SCRIPT (PRODUCTION v4.3)
+# Uses modern GCP Artifact Registry (asia-south1-docker.pkg.dev)
 # ==============================================================================
 
 set -e
@@ -9,6 +9,7 @@ set -e
 PROJECT_ID=$(gcloud config get-value project)
 REGION="asia-south1"
 JOB_NAME="uber-incentives-job"
+REPO_NAME="letzryd-docker"
 BUCKET_NAME="letzryd-uber-reports"
 DB_URL="postgresql://postgres:8S5%5DU3%40L%5EXz%29%5CFH%7D@35.200.196.113:5432/postgres"
 
@@ -68,13 +69,26 @@ if [ -f "storage_state.json" ]; then
     echo "🔑 Synced storage_state.json to gs://$BUCKET_NAME/sessions/"
 fi
 
-# 5. Build Docker Image with Cloud Build
-IMAGE_TAG="gcr.io/$PROJECT_ID/$JOB_NAME:latest"
-echo -e "\n[*] 5. Building Container Image with Cloud Build: $IMAGE_TAG..."
+# 5. Create Artifact Registry Docker Repository if not exists
+echo -e "\n[*] 5. Ensuring Artifact Registry Repository exists: $REPO_NAME in $REGION..."
+if ! gcloud artifacts repositories describe "$REPO_NAME" --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
+    gcloud artifacts repositories create "$REPO_NAME" \
+        --repository-format=docker \
+        --location="$REGION" \
+        --description="Docker repository for LetzRyd automated services" \
+        --project="$PROJECT_ID"
+    echo "✅ Artifact Registry repository created: $REPO_NAME"
+else
+    echo "✅ Artifact Registry repository exists: $REPO_NAME"
+fi
+
+# 6. Build Docker Image with Cloud Build using Artifact Registry
+IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$JOB_NAME:latest"
+echo -e "\n[*] 6. Building Container Image with Cloud Build: $IMAGE_TAG..."
 gcloud builds submit --tag "$IMAGE_TAG" --project "$PROJECT_ID"
 
-# 6. Deploy Cloud Run Job
-echo -e "\n[*] 6. Deploying Cloud Run Job: $JOB_NAME..."
+# 7. Deploy Cloud Run Job
+echo -e "\n[*] 7. Deploying Cloud Run Job: $JOB_NAME..."
 gcloud run jobs deploy "$JOB_NAME" \
     --image "$IMAGE_TAG" \
     --region "$REGION" \
@@ -85,12 +99,8 @@ gcloud run jobs deploy "$JOB_NAME" \
     --max-retries 0 \
     --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,DATABASE_URL=$DB_URL,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true"
 
-# 7. Create / Update 4 Cloud Schedulers (IST Timezone)
-# 07:00 AM IST -> 0 7 * * *
-# 08:10 AM IST -> 10 8 * * *
-# 09:10 AM IST -> 10 9 * * *
-# 10:10 AM IST -> 10 10 * * *
-echo -e "\n[*] 7. Configuring 4-Tier Cloud Schedulers (7:00, 8:10, 9:10, 10:10 AM IST)..."
+# 8. Create / Update 4 Cloud Schedulers (IST Timezone)
+echo -e "\n[*] 8. Configuring 4-Tier Cloud Schedulers (7:00, 8:10, 9:10, 10:10 AM IST)..."
 
 declare -A SCHEDULES=(
     ["uber-incentives-07-00am"]="0 7 * * *"
@@ -125,6 +135,7 @@ done
 echo -e "\n=========================================================="
 echo "🎉 ALL DONE! DEPLOYMENT COMPLETED SUCCESSFULLY!"
 echo "Cloud Run Job: $JOB_NAME"
+echo "Artifact Registry: $IMAGE_TAG"
 echo "Cloud Storage: gs://$BUCKET_NAME"
 echo "Schedule: 07:00 AM, 08:10 AM, 09:10 AM, 10:10 AM IST"
 echo "=========================================================="
