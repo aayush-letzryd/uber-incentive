@@ -129,17 +129,19 @@ def ingest_df_to_postgres(df: pd.DataFrame, city: str):
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
+        # Deduplicate on constraint columns
+        clean_df = df.drop_duplicates(subset=['Number plate', 'Start date', 'End date', 'Trip target'], keep='last')
+
         query = """
         INSERT INTO uber_vehicle_incentives_raw (
             city, vehicle_name, number_plate, start_date, end_date,
             acceptance_rate, target_acceptance_rate, trips_completed,
             trip_target, total_payout, status, driver_trip_count_breakdown
         ) VALUES %s
-        ON CONFLICT (city, number_plate, start_date, end_date) DO UPDATE SET
+        ON CONFLICT (city, number_plate, start_date, end_date, trip_target) DO UPDATE SET
             acceptance_rate = EXCLUDED.acceptance_rate,
             target_acceptance_rate = EXCLUDED.target_acceptance_rate,
             trips_completed = EXCLUDED.trips_completed,
-            trip_target = EXCLUDED.trip_target,
             total_payout = EXCLUDED.total_payout,
             status = EXCLUDED.status,
             driver_trip_count_breakdown = EXCLUDED.driver_trip_count_breakdown,
@@ -147,23 +149,23 @@ def ingest_df_to_postgres(df: pd.DataFrame, city: str):
         """
 
         records = []
-        for _, r in df.iterrows():
+        for _, r in clean_df.iterrows():
             records.append((
                 city,
-                str(r.get("Vehicle name", "")),
+                str(r.get("Vehicle name", "")) if pd.notnull(r.get("Vehicle name")) else None,
                 str(r.get("Number plate", "")),
                 r.get("Start date"),
                 r.get("End date"),
-                float(r.get("Acceptance rate", 0)) if pd.notnull(r.get("Acceptance rate")) else None,
-                float(r.get("Target acceptance rate", 0)) if pd.notnull(r.get("Target acceptance rate")) else None,
+                float(r.get("Acceptance rate")) if pd.notnull(r.get("Acceptance rate")) else None,
+                float(r.get("Target acceptance rate")) if pd.notnull(r.get("Target acceptance rate")) else None,
                 int(r.get("Trips completed", 0)) if pd.notnull(r.get("Trips completed")) else 0,
                 int(r.get("Trip target", 0)) if pd.notnull(r.get("Trip target")) else 0,
                 float(r.get("Total payout", 0)) if pd.notnull(r.get("Total payout")) else 0.0,
-                str(r.get("Status", "")),
+                str(r.get("Status", "")) if pd.notnull(r.get("Status")) else None,
                 str(r.get("Driver trip count breakdown", "")) if pd.notnull(r.get("Driver trip count breakdown")) else None
             ))
 
-        execute_values(cur, query, records)
+        execute_values(cur, query, records, page_size=2000)
         conn.commit()
         cur.close()
         conn.close()
