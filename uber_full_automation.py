@@ -1,10 +1,11 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.6)
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.7)
 ====================================================================
-1. Dynamic page lifecycle manager (`get_active_page`)
+1. Hardened active page lifecycle manager (`get_active_page`)
 2. `context.on("download")` captures popup tab downloads
 3. Instant CSV content validator
-4. Multi-city aggregation across Bangalore, Mumbai, and Hyderabad
+4. Correct unique city UUIDs and single-click UI account switcher
+5. Multi-city aggregation across Bangalore, Mumbai, and Hyderabad
 """
 
 import sys, io
@@ -48,7 +49,7 @@ TARGET_CITIES = [
     {
         "city": "Hyderabad",
         "code": "HYD",
-        "org_uuid": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
+        "org_uuid": None,  # Dynamically handled via UI Switcher to avoid Bangalore duplicate
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
         "file_keyword": "HYD_P",
@@ -113,9 +114,23 @@ def cleanup_locks():
 
 
 def get_active_page(context: BrowserContext) -> Page:
-    active_pages = [p for p in context.pages if not p.is_closed()]
-    if active_pages:
-        return active_pages[0]
+    """Safely finds an active page, ignoring closed/ephemeral tabs."""
+    try:
+        live_pages = []
+        for p in context.pages:
+            try:
+                if not p.is_closed():
+                    _ = p.url
+                    live_pages.append(p)
+            except Exception:
+                continue
+        for p in live_pages:
+            if "supplier.uber.com" in p.url:
+                return p
+        if live_pages:
+            return live_pages[0]
+    except Exception:
+        pass
     return context.new_page()
 
 
@@ -158,9 +173,11 @@ def switch_to_city(context: BrowserContext, target: dict) -> Page:
     city = target["city"]
     short = target["short_name"]
     acct = target["account_name"]
+    code = target["code"]
     org_uuid = target.get("org_uuid")
     Log.step("SWITCH", f"Opening {city} ('{short}')")
 
+    # 1. Direct URL navigation if org_uuid is known
     if org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
         Log.info(f"Navigating to {city} URL: {url}...")
@@ -178,7 +195,7 @@ def switch_to_city(context: BrowserContext, target: dict) -> Page:
             Log.warn(f"Direct navigation note: {e}")
             page = get_active_page(context)
 
-    # Fallback to UI switcher
+    # 2. UI Switcher Navigation
     Log.info(f"Using Account Switcher UI for {city}...")
     try:
         page = get_active_page(context)
@@ -192,28 +209,33 @@ def switch_to_city(context: BrowserContext, target: dict) -> Page:
                 sw_btn.click()
                 Log.wait(2, "Opening account list")
 
-                for query in [acct, short, city]:
-                    group = page.locator(f'div:has-text("{query}"), li:has-text("{query}"), span:has-text("{query}")').first
-                    if group.is_visible(timeout=1500):
-                        group.click()
-                        time.sleep(1)
-                        break
-
-                for query in [acct, short]:
-                    opt = page.locator(f'text="{query}"').last
+                # Single precise click on the matching account
+                clicked = False
+                for query in [acct, short, f"SAMVREEDDHI MOBILITY {short}", f"Samvreeddhi Mobility Pvt Ltd {short}"]:
+                    opt = page.locator(f'text="{query}"').first
                     if opt.is_visible(timeout=1500):
-                        opt.scroll_into_view_if_needed()
-                        opt.click()
-                        Log.ok(f"Selected {city} ({query}) from switcher")
-                        Log.wait(4, f"Loading {city} dashboard")
-                        break
+                        try:
+                            opt.scroll_into_view_if_needed()
+                            opt.click()
+                            Log.ok(f"Selected {city} ({query}) from switcher")
+                            clicked = True
+                            Log.wait(4, f"Loading {city} dashboard")
+                            break
+                        except Exception:
+                            pass
 
         page = get_active_page(context)
         if "/promotions" not in page.url:
-            promo_tab = page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
-            if promo_tab.is_visible(timeout=3000):
-                promo_tab.click()
-                Log.wait(3, "Opening Promotions tab")
+            if "/orgs/" in page.url:
+                current_org = page.url.split("/orgs/")[1].split("/")[0]
+                promo_url = f"https://supplier.uber.com/orgs/{current_org}/promotions"
+                page.goto(promo_url, timeout=30000, wait_until="domcontentloaded")
+                Log.wait(3, f"Opening Promotions tab: {promo_url}")
+            else:
+                promo_tab = page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
+                if promo_tab.is_visible(timeout=3000):
+                    promo_tab.click()
+                    Log.wait(3, "Opening Promotions tab")
 
         dismiss_banner(page)
         return page
@@ -241,8 +263,11 @@ def export_and_download_city(context: BrowserContext, target: dict, download_sta
         pass
 
     if not exp_btn.is_visible(timeout=2000):
-        ss_path = SS_DIR / f"missing_export_{code.lower()}.png"
-        page.screenshot(path=str(ss_path))
+        try:
+            ss_path = SS_DIR / f"missing_export_{code.lower()}.png"
+            page.screenshot(path=str(ss_path))
+        except Exception:
+            pass
         Log.err(f"Export button not visible on {city} Promotions page! (URL: {page.url})")
         return None
 
@@ -257,6 +282,7 @@ def export_and_download_city(context: BrowserContext, target: dict, download_sta
     Log.ok(f"Export triggered! Monitoring download (up to {max_wait//60} mins)...")
 
     start_time = time.time()
+    last_log = time.time()
     found_file = None
 
     while time.time() - start_time < max_wait:
@@ -264,19 +290,21 @@ def export_and_download_city(context: BrowserContext, target: dict, download_sta
 
         # 1. Check download state from context listener
         if download_state.get("latest_file") and download_state["latest_file"].exists():
-            found_file = download_state["latest_file"]
-            break
+            if is_valid_incentive_file(download_state["latest_file"]):
+                found_file = download_state["latest_file"]
+                break
 
-        # 2. Scan OUT_DIR and USER_DL_DIR
+        # 2. Scan OUT_DIR and USER_DL_DIR (exclude partial .crdownload / .tmp)
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
-                for f in search_dir.glob("*"):
-                    if f.is_file() and (f.suffix in [".csv", ".crdownload"] or "vehicle_incentives" in f.name.lower()):
+                for f in search_dir.glob("*.csv"):
+                    if f.is_file() and not f.name.endswith(".crdownload"):
                         try:
                             if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
                                 if is_valid_incentive_file(f):
                                     dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
-                                    shutil.copy2(str(f), str(dest))
+                                    if f != dest:
+                                        shutil.copy2(str(f), str(dest))
                                     found_file = dest
                                     break
                         except Exception:
@@ -287,7 +315,8 @@ def export_and_download_city(context: BrowserContext, target: dict, download_sta
         if found_file:
             break
 
-        if elapsed % 15 == 0 and elapsed > 0:
+        if time.time() - last_log >= 15:
+            last_log = time.time()
             mins = elapsed // 60
             secs = elapsed % 60
             Log.info(f"Still waiting on Uber backend export... ({mins}m {secs}s / {max_wait//60}m)")

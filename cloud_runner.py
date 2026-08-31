@@ -1,5 +1,5 @@
 """
-LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.2)
+LETZRYD · UBER VEHICLE INCENTIVES CLOUD RUNNER (PRODUCTION v4.7)
 ================================================================
 Orchestrates:
 1. Retry Triggers: 07:00 AM, 08:10 AM, 09:10 AM, 10:10 AM IST
@@ -41,21 +41,28 @@ try:
 except ImportError:
     HAS_PG = False
 
-# ==============================================================================
+# =======================================================
 # CONFIGURATION
-# ==============================================================================
-BUCKET_NAME  = os.getenv("GCS_BUCKET_NAME", "letzryd-uber-reports")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:8S5%5DU3%40L%5EXz%29%5CFH%7D@35.200.196.113:5432/postgres")
-RECIPIENTS   = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
+# =======================================================
+BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "letzryd-uber-reports")
+STATE_BLOB_NAME = "pipeline_state.json"
+COOKIES_BLOB_NAME = "session/cookies.json"
+STORAGE_STATE_BLOB_NAME = "session/storage_state.json"
 
-BASE        = Path(__file__).parent
-OUT_DIR     = BASE / "uber_reports"
-STATE_DIR   = BASE / "state"
-COOKIES_F   = BASE / "cookies.json"
-STATE_F     = BASE / "storage_state.json"
+PG_HOST = os.getenv("PG_HOST", "35.200.196.113")
+PG_PORT = int(os.getenv("PG_PORT", "5432"))
+PG_DATABASE = os.getenv("PG_DATABASE", "postgres")
+PG_USER = os.getenv("PG_USER", "postgres")
+PG_PASSWORD = os.getenv("PG_PASSWORD", "8S5]U3@L^Xz)\\FH}")
 
-for d in [OUT_DIR, STATE_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
+
+BASE_DIR = Path(__file__).parent
+OUT_DIR = BASE_DIR / "uber_reports"
+COOKIES_F = BASE_DIR / "cookies.json"
+STATE_F = BASE_DIR / "storage_state.json"
+
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_gcs_client():
@@ -64,215 +71,235 @@ def get_gcs_client():
     try:
         return storage.Client()
     except Exception as e:
-        print(f"[*] GCS client init note: {e}", flush=True)
+        print(f"[-] GCS client initialization note: {e}", flush=True)
+        return None
+
+
+def get_db_connection():
+    if not HAS_PG:
+        print("[-] psycopg2 is not installed. Database operations skipped.")
+        return None
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            connect_timeout=15
+        )
+        return conn
+    except Exception as e:
+        print(f"[-] PostgreSQL connection error: {e}", flush=True)
         return None
 
 
 def sync_cookies_from_gcs():
-    """Downloads saved session cookies from GCS bucket if running in fresh container."""
     client = get_gcs_client()
     if not client:
         return
-
     try:
         bucket = client.bucket(BUCKET_NAME)
-        for fname, local_path in [("cookies.json", COOKIES_F), ("storage_state.json", STATE_F)]:
-            blob = bucket.blob(f"sessions/{fname}")
-            if blob.exists():
-                blob.download_to_filename(str(local_path))
-                print(f"🔑 Synced {fname} from gs://{BUCKET_NAME}/sessions/", flush=True)
+        blob_cookies = bucket.blob(COOKIES_BLOB_NAME)
+        if blob_cookies.exists():
+            blob_cookies.download_to_filename(str(COOKIES_F))
+            print(f"[+] Downloaded latest cookies from gs://{BUCKET_NAME}/{COOKIES_BLOB_NAME}")
+
+        blob_state = bucket.blob(STORAGE_STATE_BLOB_NAME)
+        if blob_state.exists():
+            blob_state.download_to_filename(str(STATE_F))
+            print(f"[+] Downloaded storage_state from gs://{BUCKET_NAME}/{STORAGE_STATE_BLOB_NAME}")
     except Exception as e:
-        print(f"[*] Cookie download from GCS note: {e}", flush=True)
+        print(f"[-] Note syncing session from GCS: {e}")
 
 
 def sync_cookies_to_gcs():
-    """Uploads active session cookies to GCS bucket to persist between ephemeral container runs."""
     client = get_gcs_client()
     if not client:
         return
+    try:
+        bucket = client.bucket(BUCKET_NAME)
+        if COOKIES_F.exists():
+            bucket.blob(COOKIES_BLOB_NAME).upload_from_filename(str(COOKIES_F))
+            print(f"[+] Uploaded updated cookies to gs://{BUCKET_NAME}/{COOKIES_BLOB_NAME}")
+        if STATE_F.exists():
+            bucket.blob(STORAGE_STATE_BLOB_NAME).upload_from_filename(str(STATE_F))
+            print(f"[+] Uploaded updated storage_state to gs://{BUCKET_NAME}/{STORAGE_STATE_BLOB_NAME}")
+    except Exception as e:
+        print(f"[-] Note uploading session to GCS: {e}")
+
+
+def load_gcs_state(today_str: str) -> dict:
+    client = get_gcs_client()
+    if not client:
+        return {"date": today_str, "status": "NOT_STARTED", "attempts": 0}
+    try:
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(f"state/{today_str}/{STATE_BLOB_NAME}")
+        if blob.exists():
+            data = json.loads(blob.download_as_text())
+            return data
+    except Exception as e:
+        print(f"[-] Note reading state from GCS: {e}")
+    return {"date": today_str, "status": "NOT_STARTED", "attempts": 0}
+
+
+def save_gcs_state(today_str: str, state: dict):
+    client = get_gcs_client()
+    if not client:
+        return
+    try:
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(f"state/{today_str}/{STATE_BLOB_NAME}")
+        blob.upload_from_string(json.dumps(state, indent=2), content_type="application/json")
+        print(f"[+] State successfully saved to GCS: gs://{BUCKET_NAME}/state/{today_str}/{STATE_BLOB_NAME}")
+    except Exception as e:
+        print(f"[-] Note saving state to GCS: {e}")
+
+
+def upload_reports_to_gcs(today_str: str) -> dict:
+    urls = {}
+    client = get_gcs_client()
+    if not client:
+        print("[-] GCS client unavailable; skipping upload.")
+        return urls
 
     try:
         bucket = client.bucket(BUCKET_NAME)
-        for fname, local_path in [("cookies.json", COOKIES_F), ("storage_state.json", STATE_F)]:
-            if local_path.exists():
-                blob = bucket.blob(f"sessions/{fname}")
-                blob.upload_from_filename(str(local_path))
-                print(f"☁️ Backed up {fname} to gs://{BUCKET_NAME}/sessions/", flush=True)
+        for f in OUT_DIR.glob("*"):
+            if f.is_file() and (f.suffix in [".csv", ".xlsx"]):
+                blob_name = f"reports/{today_str}/{f.name}"
+                blob = bucket.blob(blob_name)
+                content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if f.suffix == ".xlsx" else "text/csv"
+                blob.upload_from_filename(str(f), content_type=content_type)
+                public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_name}"
+                urls[f.name] = public_url
+                print(f"[+] Uploaded {f.name} -> {public_url}")
     except Exception as e:
-        print(f"[*] Cookie backup to GCS note: {e}", flush=True)
+        print(f"[-] Error uploading reports to GCS: {e}")
+
+    return urls
 
 
-def get_today_str():
-    return datetime.datetime.now().strftime("%Y-%m-%d")
-
-
-def check_gcs_state(today_str: str) -> dict:
-    local_state_file = STATE_DIR / f"{today_str}.json"
-    if local_state_file.exists():
-        try:
-            return json.loads(local_state_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    client = get_gcs_client()
-    if client:
-        try:
-            bucket = client.bucket(BUCKET_NAME)
-            blob = bucket.blob(f"state/{today_str}.json")
-            if blob.exists():
-                data = json.loads(blob.download_as_text())
-                local_state_file.write_text(json.dumps(data), encoding="utf-8")
-                return data
-        except Exception as e:
-            print(f"[*] GCS state check note: {e}", flush=True)
-
-    return {"status": "PENDING", "attempts": 0}
-
-
-def save_gcs_state(today_str: str, state_data: dict):
-    local_state_file = STATE_DIR / f"{today_str}.json"
-    local_state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
-
-    client = get_gcs_client()
-    if client:
-        try:
-            bucket = client.bucket(BUCKET_NAME)
-            blob = bucket.blob(f"state/{today_str}.json")
-            blob.upload_from_string(json.dumps(state_data, indent=2), content_type="application/json")
-        except Exception as e:
-            print(f"[*] GCS state save note: {e}", flush=True)
-
-
-def upload_reports_to_gcs(today_str: str, files_to_upload: list[Path]) -> dict[str, str]:
-    """Uploads individual and master CSV & Excel files to GCS and returns mapping."""
-    uploaded_urls = {}
-    client = get_gcs_client()
-
-    for f in files_to_upload:
-        if f.exists():
-            blob_path = f"daily_exports/{today_str}/{f.name}"
-            public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob_path}"
-            if client:
-                try:
-                    bucket = client.bucket(BUCKET_NAME)
-                    blob = bucket.blob(blob_path)
-                    blob.upload_from_filename(str(f))
-                    print(f"☁️ Uploaded to GCS: {public_url}", flush=True)
-                except Exception as e:
-                    print(f"[-] GCS upload error for {f.name}: {e}", flush=True)
-            uploaded_urls[f.name] = public_url
-    return uploaded_urls
-
-
-# Field cleaning helpers for database safety
-def clean_str(val):
-    if pd.isna(val) or val is None:
-        return None
-    s = str(val).strip()
-    return s if s and s.lower() != "nan" else None
-
-def clean_float(val):
-    if pd.isna(val) or val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val).replace("%", "").replace("₹", "").replace(",", "").strip()
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-def clean_int(val, default=0):
-    if pd.isna(val) or val is None:
+def clean_num(val, default=0.0):
+    if pd.isna(val) or val is None or str(val).strip() in ("", "-", "NA", "N/A", "nan", "NaN"):
         return default
-    if isinstance(val, int):
-        return val
-    s = str(val).replace(",", "").strip()
     try:
-        return int(float(s))
+        cleaned = re.sub(r"[^\d.-]", "", str(val))
+        return float(cleaned) if cleaned else default
     except Exception:
         return default
+
 
 def clean_timestamp(val):
-    if pd.isna(val) or val is None:
+    if pd.isna(val) or val is None or str(val).strip() in ("", "-", "NA", "nan", "NaN"):
         return None
     try:
-        dt = pd.to_datetime(val)
-        if pd.isna(dt):
+        ts = pd.to_datetime(val, errors='coerce', dayfirst=True)
+        if pd.isna(ts):
             return None
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return ts.strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         return None
 
 
-def ingest_df_to_postgres(df: pd.DataFrame, city: str):
-    """Upserts incentives DataFrame to PostgreSQL table."""
-    if not (HAS_PG and DATABASE_URL):
-        return
+def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
+    conn = get_db_connection()
+    if not conn:
+        print("[-] DB connection unavailable; skipping ingestion.")
+        return 0
 
-    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
+        df = pd.read_excel(master_xlsx_path)
+        print(f"[*] Ingesting {len(df):,} total rows from {master_xlsx_path.name} into PostgreSQL...")
 
-        clean_df = df.copy()
-        clean_df.columns = clean_df.columns.str.strip()
+        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
-        required_subset = [c for c in ['Number plate', 'Start date', 'End date', 'Trip target'] if c in clean_df.columns]
-        if len(required_subset) == 4:
-            clean_df = clean_df.drop_duplicates(subset=required_subset, keep='last')
+        rows_to_insert = []
+        now_ts = datetime.datetime.now()
 
-        query = """
+        for _, row in df.iterrows():
+            city = str(row.get("city", "")).strip() or "Unknown"
+            vehicle_name = str(row.get("vehicle_name", "")).strip()
+            number_plate = str(row.get("number_plate", "")).strip()
+            start_date = clean_timestamp(row.get("start_date"))
+            end_date = clean_timestamp(row.get("end_date"))
+            
+            acceptance_rate = clean_num(row.get("acceptance_rate"))
+            target_acceptance_rate = clean_num(row.get("target_acceptance_rate"))
+            trips_completed = int(clean_num(row.get("trips_completed"), 0))
+            trip_target = int(clean_num(row.get("trip_target"), 0))
+            total_payout = clean_num(row.get("total_payout"))
+            status = str(row.get("status", "")).strip()
+            driver_trip_breakdown = str(row.get("driver_trip_count_breakdown", "")).strip() if pd.notna(row.get("driver_trip_count_breakdown")) else None
+
+            if not number_plate or not start_date or not end_date:
+                continue
+
+            rows_to_insert.append((
+                city,
+                vehicle_name,
+                number_plate,
+                start_date,
+                end_date,
+                acceptance_rate,
+                target_acceptance_rate,
+                trips_completed,
+                trip_target,
+                total_payout,
+                status,
+                driver_trip_breakdown,
+                now_ts
+            ))
+
+        if not rows_to_insert:
+            print("[!] No valid rows prepared for ingestion.")
+            conn.close()
+            return 0
+
+        upsert_sql = """
         INSERT INTO uber_vehicle_incentives_raw (
-            city, vehicle_name, number_plate, start_date, end_date,
-            acceptance_rate, target_acceptance_rate, trips_completed,
-            trip_target, total_payout, status, driver_trip_count_breakdown
+            city,
+            vehicle_name,
+            number_plate,
+            start_date,
+            end_date,
+            acceptance_rate,
+            target_acceptance_rate,
+            trips_completed,
+            trip_target,
+            total_payout,
+            status,
+            driver_trip_count_breakdown,
+            updated_at
         ) VALUES %s
-        ON CONFLICT (city, number_plate, start_date, end_date, trip_target) DO UPDATE SET
+        ON CONFLICT (city, number_plate, start_date, end_date, trip_target)
+        DO UPDATE SET
+            vehicle_name = EXCLUDED.vehicle_name,
             acceptance_rate = EXCLUDED.acceptance_rate,
             target_acceptance_rate = EXCLUDED.target_acceptance_rate,
             trips_completed = EXCLUDED.trips_completed,
             total_payout = EXCLUDED.total_payout,
             status = EXCLUDED.status,
             driver_trip_count_breakdown = EXCLUDED.driver_trip_count_breakdown,
-            ingested_at = CURRENT_TIMESTAMP;
+            updated_at = EXCLUDED.updated_at;
         """
 
-        records = []
-        for _, r in clean_df.iterrows():
-            plate = clean_str(r.get("Number plate"))
-            if not plate:
-                continue
-
-            start_dt = clean_timestamp(r.get("Start date")) or clean_timestamp(datetime.date.today())
-            end_dt   = clean_timestamp(r.get("End date")) or start_dt
-
-            records.append((
-                city,
-                clean_str(r.get("Vehicle name")),
-                plate,
-                start_dt,
-                end_dt,
-                clean_float(r.get("Acceptance rate")),
-                clean_float(r.get("Target acceptance rate")),
-                clean_int(r.get("Trips completed"), 0),
-                clean_int(r.get("Trip target"), 0),
-                clean_float(r.get("Total payout")) or 0.0,
-                clean_str(r.get("Status")),
-                clean_str(r.get("Driver trip count breakdown"))
-            ))
-
-        if records:
-            execute_values(cur, query, records, page_size=2000)
-            conn.commit()
-            print(f"🗄️ Ingested {len(records):,} records into PostgreSQL ({city})", flush=True)
+        cur = conn.cursor()
+        execute_values(cur, upsert_sql, rows_to_insert, page_size=2000)
+        conn.commit()
         cur.close()
+        conn.close()
+
+        print(f"✅ Successfully ingested / upserted {len(rows_to_insert):,} rows into 'uber_vehicle_incentives_raw'!")
+        return len(rows_to_insert)
+
     except Exception as e:
-        print(f"[-] Database ingestion error: {e}", flush=True)
-    finally:
+        print(f"[-] Error during PostgreSQL ingestion: {e}", flush=True)
         if conn:
-            try: conn.close()
-            except Exception: pass
+            conn.rollback()
+            conn.close()
+        raise e
 
 
 def log_execution_to_postgres(
@@ -292,117 +319,135 @@ def log_execution_to_postgres(
     duration_sec: float,
     error_msg: str = None
 ):
-    """Inserts a run record into the uber_incentives_ingestion_log table."""
-    if not (HAS_PG and DATABASE_URL):
+    conn = get_db_connection()
+    if not conn:
         return
-
-    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-
-        query = """
+        insert_sql = """
         INSERT INTO uber_incentives_ingestion_log (
-            execution_date, attempt_number, status, date_window_start, date_window_end,
-            blr_rows, mum_rows, hyd_rows, total_rows,
-            blr_file_url, mum_file_url, hyd_file_url, master_file_url,
-            execution_duration_sec, error_message
+            execution_date,
+            attempt_number,
+            status,
+            statement_start_date,
+            statement_end_date,
+            bangalore_rows,
+            mumbai_rows,
+            hyderabad_rows,
+            total_rows_ingested,
+            bangalore_gcs_url,
+            mumbai_gcs_url,
+            hyderabad_gcs_url,
+            master_gcs_url,
+            duration_seconds,
+            error_message
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
         """
-
-        cur.execute(query, (
-            today_str, attempt, status, start_dt, end_dt,
-            blr_rows, mum_rows, hyd_rows, total_rows,
-            blr_url, mum_url, hyd_url, master_url,
-            duration_sec, error_msg
+        cur.execute(insert_sql, (
+            today_str,
+            attempt,
+            status,
+            start_dt,
+            end_dt,
+            blr_rows,
+            mum_rows,
+            hyd_rows,
+            total_rows,
+            blr_url,
+            mum_url,
+            hyd_url,
+            master_url,
+            int(duration_sec),
+            error_msg
         ))
         conn.commit()
         cur.close()
-        print("🗄️ Logged execution details into uber_incentives_ingestion_log", flush=True)
+        conn.close()
+        print(f"[+] Execution log recorded in 'uber_incentives_ingestion_log' table.")
     except Exception as e:
-        print(f"[-] DB logging error: {e}", flush=True)
-    finally:
+        print(f"[-] Error logging to PostgreSQL: {e}")
         if conn:
-            try: conn.close()
-            except Exception: pass
+            conn.close()
 
 
 def run_pipeline():
-    today_str = get_today_str()
-    state = check_gcs_state(today_str)
+    now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+    today_str = now_ist.strftime("%Y-%m-%d")
+    today_compact = today_str.replace("-", "")
 
-    # 1. Idempotency check
+    state = load_gcs_state(today_str)
+    current_attempt = state.get("attempts", 0) + 1
+
+    print("=" * 60)
+    print(f"   STARTING UBER INCENTIVES PIPELINE - ATTEMPT {current_attempt} of 4")
+    print(f"   Date: {today_str} | Time: {now_ist.strftime('%H:%M:%S')} IST")
+    print("=" * 60)
+
     if state.get("status") == "SUCCESS":
-        print(f"✅ [IDEMPOTENT] Today's Uber Incentives ({today_str}) already successfully ingested on Attempt {state.get('attempts', 1)}.")
-        print("⚡ Exiting immediately with 0 extra compute.")
+        print(f"✅ Daily report for {today_str} has ALREADY SUCCEEDED in a previous run. Skipping execution.")
         return
 
-    current_attempt = state.get("attempts", 0) + 1
-    print(f"\n==========================================================")
-    print(f"   STARTING UBER INCENTIVES PIPELINE - ATTEMPT {current_attempt} of 4")
-    print(f"   Date: {today_str} | Time: {datetime.datetime.now().strftime('%H:%M:%S IST')}")
-    print(f"==========================================================")
-
-    # Sync cookies from GCS before launching browser
+    start_time = time.time()
     sync_cookies_from_gcs()
 
-    start_time = time.time()
     success = False
     error_reason = ""
 
     try:
         import uber_full_automation
+        print("\n[*] Invoking Uber Full Automation Engine...")
         uber_full_automation.main()
 
-        # Check output directory for master report
-        master_files = list(OUT_DIR.glob(f"*{today_str.replace('-', '')}*ALL_3_CITIES.xlsx"))
-        if not master_files:
-            master_files = list(OUT_DIR.glob(f"*ALL_3_CITIES.xlsx"))
+        sync_cookies_to_gcs()
+
+        # Check output directory strictly for today's generated master report
+        master_files = [
+            f for f in OUT_DIR.glob(f"*{today_compact}*ALL_3_CITIES.xlsx")
+            if f.stat().st_mtime >= (start_time - 60)
+        ]
 
         if not master_files:
-            raise RuntimeError(f"Automation executed but no Master Excel file was found in {OUT_DIR}")
+            raise RuntimeError(f"Automation executed but today's Master Excel file ({today_compact}) was not found in {OUT_DIR}")
 
         master_path = master_files[0]
+        print(f"[+] Located generated Master Excel: {master_path.name}")
+
         master_df = pd.read_excel(master_path)
-
-        # Ingest each city to DB
-        for city in master_df["City"].unique():
-            city_df = master_df[master_df["City"] == city]
-            ingest_df_to_postgres(city_df, city)
-
-        # Upload all files to GCS Bucket
-        all_reports = list(OUT_DIR.glob("*.xlsx")) + list(OUT_DIR.glob("*.csv"))
-        uploaded_urls = upload_reports_to_gcs(today_str, all_reports)
-
-        # Match city URLs
-        blr_url = next((u for k, u in uploaded_urls.items() if "blr" in k.lower() and k.endswith(".xlsx")), "#")
-        mum_url = next((u for k, u in uploaded_urls.items() if "mum" in k.lower() and k.endswith(".xlsx")), "#")
-        hyd_url = next((u for k, u in uploaded_urls.items() if "hyd" in k.lower() and k.endswith(".xlsx")), "#")
-        master_url = next((u for k, u in uploaded_urls.items() if "all_3_cities" in k.lower() and k.endswith(".xlsx")), "#")
-
-        # Row stats
         blr_rows = len(master_df[master_df["City"] == "Bangalore"])
         mum_rows = len(master_df[master_df["City"] == "Mumbai"])
         hyd_rows = len(master_df[master_df["City"] == "Hyderabad"])
         total_rows = len(master_df)
 
-        start_dt = str(master_df["Start date"].iloc[0])[:10] if "Start date" in master_df.columns and len(master_df) > 0 else today_str
-        end_dt   = str(master_df["End date"].iloc[0])[:10] if "End date" in master_df.columns and len(master_df) > 0 else today_str
-        date_window = f"{start_dt} to {end_dt}"
-        duration_sec = time.time() - start_time
-        duration_str = f"{duration_sec / 60:.1f} minutes"
+        print(f"[*] City Breakdown: Bangalore={blr_rows:,}, Mumbai={mum_rows:,}, Hyderabad={hyd_rows:,} | Total={total_rows:,}")
 
-        # Log to DB log table
+        if total_rows == 0:
+            raise RuntimeError("Generated Master Excel is empty (0 rows).")
+
+        # Ingest into PostgreSQL
+        ingested_count = upsert_master_to_postgres(master_path)
+
+        # Upload files to GCS Bucket
+        gcs_urls = upload_reports_to_gcs(today_str)
+        blr_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_BLR_P.xlsx", "#")
+        mum_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_MUM_P.xlsx", "#")
+        hyd_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_HYD_P.xlsx", "#")
+        master_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx", "#")
+
+        duration_sec = time.time() - start_time
+        mins, secs = divmod(int(duration_sec), 60)
+        duration_str = f"{mins}m {secs}s"
+
+        # Log to PostgreSQL Ingestion Log
         log_execution_to_postgres(
             today_str=today_str,
             attempt=current_attempt,
             status="SUCCESS",
-            start_dt=start_dt,
-            end_dt=end_dt,
+            start_dt=today_str,
+            end_dt=today_str,
             blr_rows=blr_rows,
             mum_rows=mum_rows,
             hyd_rows=hyd_rows,
-            total_rows=total_rows,
+            total_rows=ingested_count,
             blr_url=blr_url,
             mum_url=mum_url,
             hyd_url=hyd_url,
@@ -410,9 +455,9 @@ def run_pipeline():
             duration_sec=duration_sec
         )
 
-        # Dispatch Green Success Email with direct GCS download links
+        # Send LetzRyd Success Email
         send_success_email(
-            date_window=date_window,
+            date_window=today_str,
             blr_rows=blr_rows,
             mum_rows=mum_rows,
             hyd_rows=hyd_rows,
@@ -425,10 +470,6 @@ def run_pipeline():
             recipients=RECIPIENTS
         )
 
-        # Back up active session cookies to GCS
-        sync_cookies_to_gcs()
-
-        # Mark state as SUCCESS
         state["status"] = "SUCCESS"
         state["attempts"] = current_attempt
         state["completed_at"] = datetime.datetime.now().isoformat()
