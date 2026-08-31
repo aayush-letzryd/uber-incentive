@@ -129,10 +129,11 @@ def sync_cookies_to_gcs():
         return
     try:
         bucket = client.bucket(BUCKET_NAME)
-        if COOKIES_F.exists():
+        # Prevent 0-byte or corrupted session file uploads
+        if COOKIES_F.exists() and COOKIES_F.stat().st_size > 50:
             bucket.blob(COOKIES_BLOB_NAME).upload_from_filename(str(COOKIES_F))
             print(f"[+] Uploaded updated cookies to gs://{BUCKET_NAME}/{COOKIES_BLOB_NAME}")
-        if STATE_F.exists():
+        if STATE_F.exists() and STATE_F.stat().st_size > 50:
             bucket.blob(STORAGE_STATE_BLOB_NAME).upload_from_filename(str(STATE_F))
             print(f"[+] Uploaded updated storage_state to gs://{BUCKET_NAME}/{STORAGE_STATE_BLOB_NAME}")
     except Exception as e:
@@ -191,12 +192,17 @@ def upload_reports_to_gcs(today_str: str) -> dict:
     return urls
 
 
-def clean_num(val, default=0.0):
+def clean_num(val, default=0.0, max_val=None):
     if pd.isna(val) or val is None or str(val).strip() in ("", "-", "NA", "N/A", "nan", "NaN"):
         return default
     try:
         cleaned = re.sub(r"[^\d.-]", "", str(val))
-        return float(cleaned) if cleaned else default
+        if not cleaned:
+            return default
+        num = float(cleaned)
+        if max_val is not None:
+            num = min(num, max_val)
+        return num
     except Exception:
         return default
 
@@ -247,8 +253,8 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             start_date = clean_timestamp(row.get("start_date"))
             end_date = clean_timestamp(row.get("end_date"))
 
-            acceptance_rate = clean_num(row.get("acceptance_rate"), default=None)
-            target_acceptance_rate = clean_num(row.get("target_acceptance_rate"), default=None)
+            acceptance_rate = clean_num(row.get("acceptance_rate"), default=None, max_val=100.0)
+            target_acceptance_rate = clean_num(row.get("target_acceptance_rate"), default=None, max_val=100.0)
             trips_completed = int(clean_num(row.get("trips_completed"), 0))
             trip_target = int(clean_num(row.get("trip_target"), 0))
             total_payout = clean_num(row.get("total_payout"), 0.0)

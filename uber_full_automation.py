@@ -224,23 +224,31 @@ def verify_session_active(page: Page) -> bool:
 
 
 def dismiss_banner(page: Page):
+    """Dismisses banners, survey popups, feedback dialogs, and modal backdrops that could intercept clicks."""
     try:
         if not page.is_closed():
-            banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"]').first
-            if banner_close.is_visible(timeout=1500):
-                banner_close.click()
-                time.sleep(1)
+            # 1. Close icon or banner buttons
+            close_btn = page.locator(
+                'header svg[data-baseweb="icon"], button[aria-label="Close"], '
+                'div[role="dialog"] button:has-text("Dismiss"), button:has-text("Not now"), '
+                'button:has-text("Skip"), button:has-text("Maybe later"), button:has-text("Got it"), '
+                '#onetrust-accept-btn-handler, button:has-text("Accept all")'
+            ).first
+            if close_btn.is_visible(timeout=1000):
+                close_btn.click()
+                time.sleep(0.5)
     except Exception:
         pass
 
 
 def is_valid_incentive_file(file_path: Path) -> bool:
+    """Validates downloaded CSV header for Vehicle name and Number plate (case-insensitive, UTF-8 BOM safe)."""
     try:
         if not file_path.exists() or file_path.stat().st_size < 100:
             return False
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            header = f.readline()
-            return "Vehicle name" in header and "Number plate" in header
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            header = f.readline().lower()
+            return "vehicle name" in header and "number plate" in header
     except Exception:
         return False
 
@@ -763,8 +771,8 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
                     if str(f) in seen_files:
                         continue
                     try:
-                        # Strict trigger_time check
-                        if f.stat().st_mtime >= trigger_time and f.stat().st_size > 100:
+                        # Strict trigger_time check with 3s drift tolerance for container filesystems
+                        if f.stat().st_mtime >= (trigger_time - 3.0) and f.stat().st_size > 100:
                             if is_valid_incentive_file(f):
                                 dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
                                 if f != dest:
@@ -802,7 +810,7 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
         seen_files.add(str(dest_csv))
 
         try:
-            df = pd.read_csv(dest_csv)
+            df = pd.read_csv(dest_csv, encoding="utf-8-sig", low_memory=False, dtype=str)
             df["City"] = city
             df.to_excel(dest_xlsx, index=False)
             sample_plates = df["Number plate"].dropna().head(5).tolist() if "Number plate" in df.columns else []
@@ -955,7 +963,7 @@ def main():
                     # Bug 4 Fix: no raise e — log CSV failure and skip this city gracefully
                     if csv_path and csv_path.exists():
                         try:
-                            df = pd.read_csv(csv_path)
+                            df = pd.read_csv(csv_path, encoding="utf-8-sig", low_memory=False, dtype=str)
                             df["City"] = city_name
                             all_city_dfs.append(df)
                             Log.ok(f"✅ {city_name}: {len(df):,} rows collected.")
