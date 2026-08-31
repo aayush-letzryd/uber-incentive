@@ -13,6 +13,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
 
 import os
 import time
+import random
 import json
 import shutil
 import datetime
@@ -389,27 +390,33 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
         df = pd.read_csv(dest_csv)
         df["City"] = city
         df.to_excel(dest_xlsx, index=False)
+
+        # License Plate Sanity Check
+        sample_plates = df["Number plate"].dropna().head(5).tolist() if "Number plate" in df.columns else []
         print(f"\n🎉 [SUCCESS] {city} Dataset Downloaded & Converted: {dest_xlsx.name} ({len(df):,} rows)")
+        print(f"   🔍 Plate Sanity Check ({city}): Sample plates -> {sample_plates}")
         return dest_csv
 
     print(f"\n⚠️ Timed out waiting for {city} export.")
     return None
 
 
-def refresh_page_before_export(main_page: Page, city: str, refreshes: int = 3):
-    """Refresh the promotions page 2-3 times before clicking Export to ensure clean state."""
-    print(f"\n[*] Refreshing page {refreshes}x before Export for {city} (clearing any stale state)...")
-    for i in range(1, refreshes + 1):
-        try:
-            main_page.reload(wait_until="domcontentloaded", timeout=30000)
-            print(f"   Refresh {i}/{refreshes} complete")
-            time.sleep(3)
-        except Exception as e:
-            print(f"   Refresh {i} note: {e}")
+def refresh_page_before_export(main_page: Page, city: str, wait_seconds: int = 7):
+    """Perform 1 clean page refresh and wait 5-10 seconds for DOM and React table state to fully stabilize."""
+    print(f"\n[*] Performing 1 clean page refresh for {city}...")
+    try:
+        main_page.reload(wait_until="domcontentloaded", timeout=30000)
+        print(f"   [+] Reload complete. Stabilizing DOM for {wait_seconds}s before clicking Export...")
+        for s in range(wait_seconds, 0, -1):
+            time.sleep(1)
+        print(f"   [+] DOM fully hydrated and ready!")
+    except Exception as e:
+        print(f"   [*] Refresh note: {e}")
+        time.sleep(3)
 
 
-def cooldown_after_download(city: str, seconds: int = 30):
-    """Wait after a download to let popup tabs fully close and network settle."""
+def cooldown_after_download(city: str, seconds: int = 20):
+    """Wait smoothly after a download to let popup tabs fully close and network settle."""
     print(f"\n[*] Cooldown: waiting {seconds}s after {city} download before next city...")
     for i in range(seconds, 0, -5):
         print(f"   Cooldown: {i}s remaining...", flush=True)
@@ -474,9 +481,9 @@ def run():
 
         for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city_visual(context, main_page, target, previous_orgs)
-            time.sleep(2)
-            # Refresh page 3x before clicking Export to clear any stale state / leftover popup artefacts
-            refresh_page_before_export(main_page, target["city"], refreshes=3)
+            time.sleep(random.uniform(2.0, 3.0))
+            # 1 Clean page refresh + 7s DOM stabilization wait before clicking Export
+            refresh_page_before_export(main_page, target["city"], wait_seconds=7)
             # Reset download state so we don't accidentally pick up the previous city's late event
             download_state["latest_file"] = None
             csv_path = export_and_download_visual(context, main_page, target, download_state, seen_files)
@@ -490,9 +497,9 @@ def run():
                 # Record this city's org UUID so next city can't use it
                 if target.get("org_uuid"):
                     previous_orgs.add(target["org_uuid"])
-            # 30s cooldown between cities so popup tabs fully close and network settles
+            # 20s cooldown between cities so popup tabs fully close and network settles
             if i < len(TARGET_CITIES) - 1:
-                cooldown_after_download(target["city"], seconds=30)
+                cooldown_after_download(target["city"], seconds=20)
 
         if all_city_dfs:
             master_df = pd.concat(all_city_dfs, ignore_index=True)

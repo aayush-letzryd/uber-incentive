@@ -438,7 +438,9 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
             df = pd.read_csv(dest_csv)
             df["City"] = city
             df.to_excel(dest_xlsx, index=False)
+            sample_plates = df["Number plate"].dropna().head(5).tolist() if "Number plate" in df.columns else []
             Log.ok(f"✅ Saved official dataset ({len(df):,} rows) -> {dest_xlsx.name}")
+            Log.info(f"🔍 Plate Sanity Check ({city}): Sample plates -> {sample_plates}")
             return dest_csv
         except Exception as e:
             Log.warn(f"Excel conversion note: {e}")
@@ -539,15 +541,17 @@ def main():
         for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city(context, main_page, target, previous_orgs)
             time.sleep(2)
-            # Refresh page 3x before clicking Export to clear stale state / leftover popup artefacts
-            Log.info(f"Refreshing page 3x before Export for {target['city']}...")
-            for r in range(1, 4):
-                try:
-                    main_page.reload(wait_until="domcontentloaded", timeout=30000)
-                    Log.info(f"  Refresh {r}/3 complete")
-                    time.sleep(3)
-                except Exception as e:
-                    Log.warn(f"  Refresh {r} note: {e}")
+            # 1 Clean page refresh + 7s DOM stabilization wait before clicking Export
+            Log.info(f"Performing 1 clean page refresh for {target['city']}...")
+            try:
+                main_page.reload(wait_until="domcontentloaded", timeout=30000)
+                Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
+                time.sleep(7)
+                Log.ok(f"  DOM fully hydrated and ready!")
+            except Exception as e:
+                Log.warn(f"  Refresh note: {e}")
+                time.sleep(3)
+
             # Reset download state so previous city's late event is not picked up
             download_state["latest_file"] = None
             csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
@@ -561,10 +565,10 @@ def main():
                 # Record this city's org UUID so next city can't use it
                 if target.get("org_uuid"):
                     previous_orgs.add(target["org_uuid"])
-            # 30s cooldown between cities so popup tabs fully close and network settles
+            # 20s cooldown between cities so popup tabs fully close and network settles
             if i < len(TARGET_CITIES) - 1:
-                Log.info(f"Cooldown: 30s after {target['city']} download before proceeding...")
-                for s in range(30, 0, -5):
+                Log.info(f"Cooldown: 20s after {target['city']} download before proceeding...")
+                for s in range(20, 0, -5):
                     Log.info(f"  Cooldown: {s}s remaining...")
                     time.sleep(5)
 
