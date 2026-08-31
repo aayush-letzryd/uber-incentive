@@ -462,11 +462,11 @@ def run_pipeline():
             start_col = next((c for c in master_df.columns if "start" in c.lower() and "date" in c.lower()), None)
             end_col   = next((c for c in master_df.columns if "end" in c.lower() and "date" in c.lower()), None)
             if start_col:
-                parsed = pd.to_datetime(master_df[start_col], errors="coerce", dayfirst=True)
+                parsed = pd.to_datetime(master_df[start_col], errors="coerce")
                 if not parsed.dropna().empty:
                     date_window_start = str(parsed.min().date())
             if end_col:
-                parsed = pd.to_datetime(master_df[end_col], errors="coerce", dayfirst=True)
+                parsed = pd.to_datetime(master_df[end_col], errors="coerce")
                 if not parsed.dropna().empty:
                     date_window_end = str(parsed.max().date())
             print(f"[*] Date Window: {date_window_start} → {date_window_end}")
