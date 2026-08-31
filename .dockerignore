@@ -9,3 +9,10 @@ uber_reports/
 state/
 *.log
 .env
+*.env
+cookies.json
+storage_state.json
+cookies_b64.txt
+*.b64
+*.xlsx
+*.csv

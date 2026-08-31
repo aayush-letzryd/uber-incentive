@@ -124,7 +124,7 @@ def load_cached_org_uuids() -> dict:
     return {
         "BLR": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
         "MUM": "44cb587c-a690-44b5-94c2-37539500c7d5",
-        "HYD": None
+        "HYD": "f7d7968b-43fe-4c15-bfc8-30a82c8ad5b9"
     }
 
 
@@ -358,6 +358,7 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
                                     shutil.copy2(str(f), str(dest))
                                 found_file = dest
                                 seen_files.add(str(f))
+                                seen_files.add(str(dest))
                                 print(f"\n📥 Found downloaded file: {f.name} -> {dest.name}")
                                 break
                     except Exception:
@@ -386,6 +387,7 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
 
         if found_file != dest_csv:
             shutil.copy2(str(found_file), str(dest_csv))
+        seen_files.add(str(dest_csv))
 
         df = pd.read_csv(dest_csv)
         df["City"] = city
@@ -449,77 +451,81 @@ def run():
             ]
         )
 
-        def on_context_download(download):
-            print(f"\n📥 [CONTEXT DOWNLOAD EVENT] Suggested filename: {download.suggested_filename}")
-            dest = OUT_DIR / download.suggested_filename
-            try:
-                download.save_as(str(dest))
-                download_state["latest_file"] = dest
-                print(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-            except Exception as e:
-                print(f"[*] Save note: {e}")
-
-        context.on("download", on_context_download)
-
-        main_page = context.pages[0] if context.pages else context.new_page()
-
         try:
-            Stealth().apply_stealth_sync(main_page)
-            print("[+] Stealth mode active")
-        except Exception as e:
-            print(f"[*] Stealth note: {e}")
-
-        if COOKIES_F.exists():
-            cookies = json.loads(COOKIES_F.read_text(encoding="utf-8"))
-            context.add_cookies(cookies)
-            print(f"[+] Loaded {len(cookies)} saved session cookies")
-
-        all_city_dfs = []
-        today = datetime.datetime.now().strftime("%Y%m%d")
-        seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
-        previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
-
-        for i, target in enumerate(TARGET_CITIES):
-            main_page = switch_to_city_visual(context, main_page, target, previous_orgs)
-            time.sleep(random.uniform(2.0, 3.0))
-            # 1 Clean page refresh + 7s DOM stabilization wait before clicking Export
-            refresh_page_before_export(main_page, target["city"], wait_seconds=7)
-            # Reset download state so we don't accidentally pick up the previous city's late event
-            download_state["latest_file"] = None
-            csv_path = export_and_download_visual(context, main_page, target, download_state, seen_files)
-            if csv_path and csv_path.exists():
+            def on_context_download(download):
+                print(f"\n📥 [CONTEXT DOWNLOAD EVENT] Suggested filename: {download.suggested_filename}")
+                dest = OUT_DIR / download.suggested_filename
                 try:
-                    df = pd.read_csv(csv_path)
-                    df["City"] = target["city"]
-                    all_city_dfs.append(df)
-                except Exception:
-                    pass
-                # Record this city's org UUID so next city can't use it
-                if target.get("org_uuid"):
-                    previous_orgs.add(target["org_uuid"])
-            # 20s cooldown between cities so popup tabs fully close and network settles
-            if i < len(TARGET_CITIES) - 1:
-                cooldown_after_download(target["city"], seconds=20)
+                    download.save_as(str(dest))
+                    download_state["latest_file"] = dest
+                    print(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
+                except Exception as e:
+                    print(f"[*] Save note: {e}")
 
-        if all_city_dfs:
-            master_df = pd.concat(all_city_dfs, ignore_index=True)
-            master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"
-            master_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.csv"
+            context.on("download", on_context_download)
 
-            cols = ["City"] + [c for c in master_df.columns if c != "City"]
-            master_df = master_df[cols]
+            main_page = context.pages[0] if context.pages else context.new_page()
 
-            master_df.to_excel(master_xlsx, index=False)
-            master_df.to_csv(master_csv, index=False)
+            try:
+                Stealth().apply_stealth_sync(main_page)
+                print("[+] Stealth mode active")
+            except Exception as e:
+                print(f"[*] Stealth note: {e}")
 
-            print("\n" + "=" * 70)
-            print(f"🎉 MASTER REPORT CREATED: {master_xlsx}")
-            print(f"📊 Total Rows Across All 3 Cities: {len(master_df):,}")
-            print("=" * 70)
+            if COOKIES_F.exists():
+                cookies = json.loads(COOKIES_F.read_text(encoding="utf-8"))
+                context.add_cookies(cookies)
+                print(f"[+] Loaded {len(cookies)} saved session cookies")
 
-        print("\n[*] Execution completed successfully. Closing browser in 10 seconds...")
-        time.sleep(10)
-        context.close()
+            all_city_dfs = []
+            today = datetime.datetime.now().strftime("%Y%m%d")
+            seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
+            previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
+
+            for i, target in enumerate(TARGET_CITIES):
+                main_page = switch_to_city_visual(context, main_page, target, previous_orgs)
+                time.sleep(random.uniform(2.0, 3.0))
+                # 1 Clean page refresh + 7s DOM stabilization wait before clicking Export
+                refresh_page_before_export(main_page, target["city"], wait_seconds=7)
+                # Reset download state so we don't accidentally pick up the previous city's late event
+                download_state["latest_file"] = None
+                csv_path = export_and_download_visual(context, main_page, target, download_state, seen_files)
+                if csv_path and csv_path.exists():
+                    try:
+                        df = pd.read_csv(csv_path)
+                        df["City"] = target["city"]
+                        all_city_dfs.append(df)
+                    except Exception:
+                        pass
+                    # Record this city's org UUID so next city can't use it
+                    if target.get("org_uuid"):
+                        previous_orgs.add(target["org_uuid"])
+                # 20s cooldown between cities so popup tabs fully close and network settles
+                if i < len(TARGET_CITIES) - 1:
+                    cooldown_after_download(target["city"], seconds=20)
+
+            if all_city_dfs:
+                master_df = pd.concat(all_city_dfs, ignore_index=True)
+                master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"
+                master_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.csv"
+
+                cols = ["City"] + [c for c in master_df.columns if c != "City"]
+                master_df = master_df[cols]
+
+                master_df.to_excel(master_xlsx, index=False)
+                master_df.to_csv(master_csv, index=False)
+
+                print("\n" + "=" * 70)
+                print(f"🎉 MASTER REPORT CREATED: {master_xlsx}")
+                print(f"📊 Total Rows Across All 3 Cities: {len(master_df):,}")
+                print("=" * 70)
+
+        finally:
+            print("\n[*] Closing browser cleanly...")
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

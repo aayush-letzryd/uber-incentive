@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS uber_vehicle_incentives_raw (
     driver_trip_count_breakdown TEXT,
     org_name                    VARCHAR(150),
     ingested_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_vehicle_incentive_window UNIQUE (city, number_plate, start_date, end_date)
+    CONSTRAINT uq_vehicle_incentive_window UNIQUE (city, number_plate, start_date, end_date, trip_target)
 );
 
 CREATE INDEX IF NOT EXISTS idx_uber_inc_city ON uber_vehicle_incentives_raw(city);
@@ -60,18 +60,28 @@ CREATE TABLE IF NOT EXISTS uber_incentives_ingestion_log (
     created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_uber_inc_log_date ON uber_incentives_ingestion_log(execution_date);
-CREATE INDEX IF NOT EXISTS idx_uber_inc_log_status ON uber_incentives_ingestion_log(status);
+CREATE INDEX IF NOT EXISTS idx_uber_logs_date ON uber_incentives_ingestion_log(execution_date);
+CREATE INDEX IF NOT EXISTS idx_uber_logs_status ON uber_incentives_ingestion_log(status);
 """
 
-try:
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    print("Applying table migrations to PostgreSQL database...")
-    cur.execute(CREATE_TABLES_SQL)
-    conn.commit()
-    print("✅ Tables 'uber_vehicle_incentives_raw' and 'uber_incentives_ingestion_log' successfully verified & created in PostgreSQL!")
-    cur.close()
-    conn.close()
-except Exception as e:
-    print(f"❌ Error applying migration: {e}")
+def main():
+    print("[*] Connecting to PostgreSQL at 35.200.196.113...")
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        print("[*] Applying migration schema...")
+        cur.execute(CREATE_TABLES_SQL)
+        conn.commit()
+        print("✅ Schema migration applied successfully!")
+    except Exception as e:
+        print(f"[-] Migration error: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+if __name__ == "__main__":
+    main()

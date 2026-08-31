@@ -612,7 +612,8 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
     code = target["code"]
     kw   = target["file_keyword"]
     max_wait = target.get("max_wait_seconds", 900)
-    today = datetime.datetime.now().strftime("%Y%m%d")
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    today = datetime.datetime.now(ist_tz).strftime("%Y%m%d")
     Log.step("EXPORT", f"Triggering Official Export & Download for {city} ({code})")
 
     dismiss_banner(main_page)
@@ -647,8 +648,9 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
     time.sleep(2)
     try:
         confirmed = main_page.locator(
-            'text="Generating", text="Processing", text="Export in progress",'
-            '[data-testid*="toast"], [class*="toast"], [role="alert"]'
+            'text=/Generating|Processing|Export in progress/'
+        ).or_(
+            main_page.locator('[data-testid*="toast"], [class*="toast"], [role="alert"]')
         ).first
         if confirmed.is_visible(timeout=4000):
             Log.ok(f"✅ Export confirmed — Uber acknowledged the request for {city}.")
@@ -674,6 +676,7 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
             if str(download_state["latest_file"]) not in seen_files:
                 if is_valid_incentive_file(download_state["latest_file"]):
                     found_file = download_state["latest_file"]
+                    seen_files.add(str(found_file))
                     break
 
         # 2. Scan OUT_DIR and USER_DL_DIR — catch .csv AND UUID-named files (no extension)
@@ -695,6 +698,7 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
                                     shutil.copy2(str(f), str(dest))
                                 found_file = dest
                                 seen_files.add(str(f))
+                                seen_files.add(str(dest))
                                 break
                     except Exception:
                         pass
@@ -722,6 +726,7 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
 
         if found_file != dest_csv:
             shutil.copy2(str(found_file), str(dest_csv))
+        seen_files.add(str(dest_csv))
 
         try:
             df = pd.read_csv(dest_csv)
@@ -800,106 +805,112 @@ def main():
 
         context = pw.chromium.launch_persistent_context(**launch_kwargs)
 
-        def on_context_download(download):
-            Log.ok(f"📥 Context Download Event: {download.suggested_filename}")
-            dest = OUT_DIR / download.suggested_filename
-            try:
-                download.save_as(str(dest))
-                download_state["latest_file"] = dest
-                Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-            except Exception as e:
-                Log.warn(f"Download save_as note: {e}")
-
-        context.on("download", on_context_download)
-
-        main_page = context.pages[0] if context.pages else context.new_page()
-        
         try:
-            Stealth().apply_stealth_sync(main_page)
-            Log.ok("Stealth mode active")
-        except Exception as e:
-            Log.warn(f"Stealth apply note: {e}")
-
-        load_session(context)
-
-        # ── PRE-FLIGHT SESSION CHECK (Fix #1) ──────────────────────────────
-        # Validate cookies are still live BEFORE entering city loop.
-        # If session expired, trigger login immediately so city 1 doesn't waste 3 mins.
-        if not verify_session_active(main_page):
-            Log.warn("Session cookies expired or invalid. Triggering automated login now...")
-            if not ensure_login(main_page, context):
-                raise RuntimeError("Pre-flight login failed. Cannot proceed without authenticated session.")
-        # ───────────────────────────────────────────────────────────────────
-
-        all_city_dfs = []
-        today = datetime.datetime.now().strftime("%Y%m%d")
-        seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
-        previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
-
-        for i, target in enumerate(TARGET_CITIES):
-            main_page = switch_to_city(context, main_page, target, previous_orgs)
-            time.sleep(2)
-            # ── 1 Clean page refresh + 7s DOM stabilization (Fix #6) ────────────
-            Log.info(f"Performing 1 clean page refresh for {target['city']}...")
-            try:
-                main_page.reload(wait_until="domcontentloaded", timeout=30000)
-                Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
-                time.sleep(7)
-                Log.ok(f"  DOM fully hydrated and ready!")
-                # ── Post-reload session guard ─────────────────────────────────
-                if "auth.uber.com" in main_page.url:
-                    Log.warn(f"Session dropped during {target['city']} reload! Re-logging in...")
-                    if ensure_login(main_page, context):
-                        org_uuid = target.get("org_uuid", "")
-                        if org_uuid:
-                            main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions",
-                                           timeout=30000, wait_until="domcontentloaded")
-                            time.sleep(5)
-                # ─────────────────────────────────────────────────────────────
-            except Exception as e:
-                Log.warn(f"  Refresh note: {e}")
-                time.sleep(3)
-
-            # Reset download state so previous city's late event is not picked up
-            download_state["latest_file"] = None
-            csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
-            if csv_path and csv_path.exists():
+            def on_context_download(download):
+                Log.ok(f"📥 Context Download Event: {download.suggested_filename}")
+                dest = OUT_DIR / download.suggested_filename
                 try:
-                    df = pd.read_csv(csv_path)
-                    df["City"] = target["city"]
-                    all_city_dfs.append(df)
-                except Exception:
-                    pass
-                # Record this city's org UUID so next city can't use it
-                if target.get("org_uuid"):
-                    previous_orgs.add(target["org_uuid"])
-            # 20s cooldown between cities so popup tabs fully close and network settles
-            if i < len(TARGET_CITIES) - 1:
-                Log.info(f"Cooldown: 20s after {target['city']} download before proceeding...")
-                for s in range(20, 0, -5):
-                    Log.info(f"  Cooldown: {s}s remaining...")
-                    time.sleep(5)
+                    download.save_as(str(dest))
+                    download_state["latest_file"] = dest
+                    Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
+                except Exception as e:
+                    Log.warn(f"Download save_as note: {e}")
 
-        if all_city_dfs:
-            master_df = pd.concat(all_city_dfs, ignore_index=True)
-            master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"
-            master_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.csv"
+            context.on("download", on_context_download)
 
-            cols = ["City"] + [c for c in master_df.columns if c != "City"]
-            master_df = master_df[cols]
+            main_page = context.pages[0] if context.pages else context.new_page()
+            
+            try:
+                Stealth().apply_stealth_sync(main_page)
+                Log.ok("Stealth mode active")
+            except Exception as e:
+                Log.warn(f"Stealth apply note: {e}")
 
-            master_df.to_excel(master_xlsx, index=False)
-            master_df.to_csv(master_csv, index=False)
+            load_session(context)
 
-            Log.ok("=" * 70)
-            Log.ok(f"🎉 MASTER CONSOLIDATED REPORT GENERATED SUCCESSFULLY!")
-            Log.ok(f"📁 Excel: {master_xlsx}")
-            Log.ok(f"📊 Total Rows Across All 3 Cities: {len(master_df):,}")
-            Log.ok("=" * 70)
+            # ── PRE-FLIGHT SESSION CHECK (Fix #1) ──────────────────────────────
+            # Validate cookies are still live BEFORE entering city loop.
+            # If session expired, trigger login immediately so city 1 doesn't waste 3 mins.
+            if not verify_session_active(main_page):
+                Log.warn("Session cookies expired or invalid. Triggering automated login now...")
+                if not ensure_login(main_page, context):
+                    raise RuntimeError("Pre-flight login failed. Cannot proceed without authenticated session.")
+            # ───────────────────────────────────────────────────────────────────
 
-        Log.info("Closing browser in 5 seconds...")
-        time.sleep(5)
-        context.close()
+            all_city_dfs = []
+            ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+            today = datetime.datetime.now(ist_tz).strftime("%Y%m%d")
+            seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
+            previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
+
+            for i, target in enumerate(TARGET_CITIES):
+                main_page = switch_to_city(context, main_page, target, previous_orgs)
+                time.sleep(2)
+                # ── 1 Clean page refresh + 7s DOM stabilization (Fix #6) ────────────
+                Log.info(f"Performing 1 clean page refresh for {target['city']}...")
+                try:
+                    main_page.reload(wait_until="domcontentloaded", timeout=30000)
+                    Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
+                    time.sleep(7)
+                    Log.ok(f"  DOM fully hydrated and ready!")
+                    # ── Post-reload session guard ─────────────────────────────────
+                    if "auth.uber.com" in main_page.url:
+                        Log.warn(f"Session dropped during {target['city']} reload! Re-logging in...")
+                        if ensure_login(main_page, context):
+                            org_uuid = target.get("org_uuid", "")
+                            if org_uuid:
+                                main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions",
+                                               timeout=30000, wait_until="domcontentloaded")
+                                time.sleep(5)
+                    # ─────────────────────────────────────────────────────────────
+                except Exception as e:
+                    Log.warn(f"  Refresh note: {e}")
+                    time.sleep(3)
+
+                # Reset download state so previous city's late event is not picked up
+                download_state["latest_file"] = None
+                csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
+                if csv_path and csv_path.exists():
+                    try:
+                        df = pd.read_csv(csv_path)
+                        df["City"] = target["city"]
+                        all_city_dfs.append(df)
+                    except Exception as e:
+                        Log.err(f"Failed to read CSV for {target['city']}: {e}")
+                        raise e
+                    # Record this city's org UUID so next city can't use it
+                    if target.get("org_uuid"):
+                        previous_orgs.add(target["org_uuid"])
+                # 20s cooldown between cities so popup tabs fully close and network settles
+                if i < len(TARGET_CITIES) - 1:
+                    Log.info(f"Cooldown: 20s after {target['city']} download before proceeding...")
+                    for s in range(20, 0, -5):
+                        Log.info(f"  Cooldown: {s}s remaining...")
+                        time.sleep(5)
+
+            if all_city_dfs:
+                master_df = pd.concat(all_city_dfs, ignore_index=True)
+                master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"
+                master_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.csv"
+
+                cols = ["City"] + [c for c in master_df.columns if c != "City"]
+                master_df = master_df[cols]
+
+                master_df.to_excel(master_xlsx, index=False)
+                master_df.to_csv(master_csv, index=False)
+
+                Log.ok("=" * 70)
+                Log.ok(f"🎉 MASTER CONSOLIDATED REPORT GENERATED SUCCESSFULLY!")
+                Log.ok(f"📁 Excel: {master_xlsx}")
+                Log.ok(f"📊 Total Rows Across All 3 Cities: {len(master_df):,}")
+                Log.ok("=" * 70)
+
+        finally:
+            Log.info("Closing browser context cleanly...")
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

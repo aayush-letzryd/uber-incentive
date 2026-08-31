@@ -3,6 +3,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 import os
+import html
 import smtplib
 import datetime
 from email.mime.multipart import MIMEMultipart
@@ -260,7 +261,7 @@ def send_success_email(
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, recipients, msg.as_string())
         print(f"✅ Success email sent to {recipients}", flush=True)
@@ -289,6 +290,7 @@ def send_failure_email(
     msg["To"] = ", ".join(recipients)
 
     now_ist = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p IST")
+    safe_failure_reason = html.escape(str(failure_reason))
 
     html_content = f"""<!DOCTYPE html>
 <html>
@@ -399,7 +401,7 @@ def send_failure_email(
           </tr>
           <tr style="border-bottom: 1px dashed #fee2e2;">
             <td style="padding: 9px 0; color: #4b5563; font-weight: 500; vertical-align: top;">Failure Reason:</td>
-            <td style="padding: 9px 0; color: #b91c1c; font-weight: 600; line-height: 1.4;">{failure_reason}</td>
+            <td style="padding: 9px 0; color: #b91c1c; font-weight: 600; line-height: 1.4;">{safe_failure_reason}</td>
           </tr>
           <tr style="border-bottom: 1px dashed #fee2e2;">
             <td style="padding: 9px 0; color: #4b5563; font-weight: 500;">Database Protection:</td>
@@ -425,7 +427,7 @@ def send_failure_email(
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, recipients, msg.as_string())
         print(f"✅ Failure alert email sent to {recipients}", flush=True)

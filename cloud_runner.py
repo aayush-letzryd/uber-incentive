@@ -18,6 +18,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 import os
+import re
 import time
 import json
 import shutil
@@ -216,6 +217,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         print("[-] DB connection unavailable; skipping ingestion.")
         return 0
 
+    cur = None
     try:
         df = pd.read_excel(master_xlsx_path)
         print(f"[*] Ingesting {len(df):,} total rows from {master_xlsx_path.name} into PostgreSQL...")
@@ -232,11 +234,11 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             start_date = clean_timestamp(row.get("start_date"))
             end_date = clean_timestamp(row.get("end_date"))
             
-            acceptance_rate = clean_num(row.get("acceptance_rate"))
-            target_acceptance_rate = clean_num(row.get("target_acceptance_rate"))
+            acceptance_rate = clean_num(row.get("acceptance_rate"), default=None)
+            target_acceptance_rate = clean_num(row.get("target_acceptance_rate"), default=None)
             trips_completed = int(clean_num(row.get("trips_completed"), 0))
             trip_target = int(clean_num(row.get("trip_target"), 0))
-            total_payout = clean_num(row.get("total_payout"))
+            total_payout = clean_num(row.get("total_payout"), 0.0)
             status = str(row.get("status", "")).strip()
             driver_trip_breakdown = str(row.get("driver_trip_count_breakdown", "")).strip() if pd.notna(row.get("driver_trip_count_breakdown")) else None
 
@@ -261,7 +263,6 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
 
         if not rows_to_insert:
             print("[!] No valid rows prepared for ingestion.")
-            conn.close()
             return 0
 
         upsert_sql = """
@@ -295,8 +296,6 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         cur = conn.cursor()
         execute_values(cur, upsert_sql, rows_to_insert, page_size=2000)
         conn.commit()
-        cur.close()
-        conn.close()
 
         print(f"✅ Successfully ingested / upserted {len(rows_to_insert):,} rows into 'uber_vehicle_incentives_raw'!")
         return len(rows_to_insert)
@@ -305,8 +304,12 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         print(f"[-] Error during PostgreSQL ingestion: {e}", flush=True)
         if conn:
             conn.rollback()
-            conn.close()
         raise e
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 def log_execution_to_postgres(
@@ -329,6 +332,7 @@ def log_execution_to_postgres(
     conn = get_db_connection()
     if not conn:
         return
+    cur = None
     try:
         cur = conn.cursor()
         insert_sql = """
@@ -368,11 +372,14 @@ def log_execution_to_postgres(
             error_msg
         ))
         conn.commit()
-        cur.close()
-        conn.close()
         print(f"[+] Execution log recorded in 'uber_incentives_ingestion_log' table.")
     except Exception as e:
         print(f"[-] Error logging to PostgreSQL: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if cur:
+            cur.close()
         if conn:
             conn.close()
 

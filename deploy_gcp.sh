@@ -43,6 +43,11 @@ SA_EMAIL="$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
 echo -e "\n[*] 2. Granting IAM Roles to Compute Service Account ($SA_EMAIL)..."
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/run.developer" \
+    --condition=None >/dev/null 2>&1 || true
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$SA_EMAIL" \
     --role="roles/run.invoker" \
     --condition=None >/dev/null 2>&1 || true
 
@@ -51,12 +56,12 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --role="roles/storage.objectAdmin" \
     --condition=None >/dev/null 2>&1 || true
 
-# ── Fix #7/#9: Grant Secret Manager access to the SA ─────────────────────────
+# ── Grant Secret Manager access to the SA ─────────────────────────────────
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/secretmanager.secretAccessor" \
     --condition=None >/dev/null 2>&1 || true
-echo "✅ Secret Manager accessor role granted to $SA_EMAIL"
+echo "✅ IAM Roles (run.developer, storage.objectAdmin, secretmanager.secretAccessor) granted to $SA_EMAIL"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # 3. Create Cloud Storage Bucket
@@ -80,23 +85,24 @@ if [ -f "storage_state.json" ]; then
     echo "🔑 Synced storage_state.json to gs://$BUCKET_NAME/session/ and sessions/"
 fi
 
-# ── Fix #7/#9: Create Secrets in GCP Secret Manager ─────────────────────────
-echo -e "\n[*] 4a. Setting up GCP Secrets (PG_PASSWORD, UBER_PASSWORD)..."
+# ── Create Secrets in GCP Secret Manager ────────────────────────────────────
+echo -e "\n[*] 4a. Setting up GCP Secrets (PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD)..."
 
 create_or_update_secret() {
     local SECRET_NAME="$1"
     local SECRET_VALUE="$2"
     if gcloud secrets describe "$SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
         echo "   -> Updating secret: $SECRET_NAME"
-        echo -n "$SECRET_VALUE" | gcloud secrets versions add "$SECRET_NAME" --data-file=- --project="$PROJECT_ID"
+        printf "%s" "$SECRET_VALUE" | gcloud secrets versions add "$SECRET_NAME" --data-file=- --project="$PROJECT_ID"
     else
         echo "   -> Creating secret: $SECRET_NAME"
-        echo -n "$SECRET_VALUE" | gcloud secrets create "$SECRET_NAME" --data-file=- --replication-policy="automatic" --project="$PROJECT_ID"
+        printf "%s" "$SECRET_VALUE" | gcloud secrets create "$SECRET_NAME" --data-file=- --replication-policy="automatic" --project="$PROJECT_ID"
     fi
 }
 
 create_or_update_secret "PG_PASSWORD"    "8S5]U3@L^Xz)\FH}"
 create_or_update_secret "UBER_PASSWORD"  "Letzuberp123"
+create_or_update_secret "SMTP_PASSWORD"  "gqnkqlhyrdclrwrn"
 echo "✅ Secrets stored in GCP Secret Manager (removed from source code)"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -129,7 +135,7 @@ gcloud run jobs deploy "$JOB_NAME" \
     --task-timeout 3600s \
     --max-retries 0 \
     --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres" \
-    --set-secrets="PG_PASSWORD=PG_PASSWORD:latest,UBER_PASSWORD=UBER_PASSWORD:latest"
+    --set-secrets="PG_PASSWORD=PG_PASSWORD:latest,UBER_PASSWORD=UBER_PASSWORD:latest,SMTP_PASSWORD=SMTP_PASSWORD:latest"
 
 # 8. Create / Update 4 Cloud Schedulers (IST Timezone)
 echo -e "\n[*] 8. Configuring 4-Tier Cloud Schedulers (7:00, 8:10, 9:10, 10:10 AM IST)..."
@@ -141,6 +147,8 @@ declare -A SCHEDULES=(
     ["uber-incentives-10-10am"]="10 10 * * *"
 )
 
+SCHEDULER_URI="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/$JOB_NAME:run"
+
 for NAME in "${!SCHEDULES[@]}"; do
     CRON="${SCHEDULES[$NAME]}"
     echo "   -> Setting up $NAME ($CRON IST)..."
@@ -149,13 +157,17 @@ for NAME in "${!SCHEDULES[@]}"; do
         gcloud scheduler jobs update http "$NAME" \
             --schedule="$CRON" \
             --time-zone="Asia/Kolkata" \
+            --uri="$SCHEDULER_URI" \
+            --http-method="POST" \
+            --oauth-service-account-email="$SA_EMAIL" \
+            --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
             --location="$REGION" \
             --project="$PROJECT_ID"
     else
         gcloud scheduler jobs create http "$NAME" \
             --schedule="$CRON" \
             --time-zone="Asia/Kolkata" \
-            --uri="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/$JOB_NAME:run" \
+            --uri="$SCHEDULER_URI" \
             --http-method="POST" \
             --oauth-service-account-email="$SA_EMAIL" \
             --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
