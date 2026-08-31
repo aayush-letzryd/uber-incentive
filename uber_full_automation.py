@@ -165,79 +165,176 @@ def is_valid_incentive_file(file_path: Path) -> bool:
         return False
 
 
-def switch_to_city(context: BrowserContext, main_page: Page, target: dict) -> Page:
+ORG_CACHE_FILE = BASE / "org_uuids.json"
+
+
+def load_cached_org_uuids() -> dict:
+    if ORG_CACHE_FILE.exists():
+        try:
+            return json.loads(ORG_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "BLR": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
+        "MUM": "44cb587c-a690-44b5-94c2-37539500c7d5",
+        "HYD": None
+    }
+
+
+def save_cached_org_uuid(code: str, uuid: str):
+    try:
+        cached = load_cached_org_uuids()
+        cached[code] = uuid
+        ORG_CACHE_FILE.write_text(json.dumps(cached, indent=2), encoding="utf-8")
+        Log.ok(f"Saved discovered Org UUID for {code}: {uuid} -> {ORG_CACHE_FILE.name}")
+    except Exception as e:
+        Log.warn(f"Note saving org UUID: {e}")
+
+
+def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previous_orgs: set) -> Page:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
+    code = target["code"]
     short = target["short_name"]
     acct = target["account_name"]
-    org_uuid = target.get("org_uuid")
+
+    cached_orgs = load_cached_org_uuids()
+    org_uuid = target.get("org_uuid") or cached_orgs.get(code)
     Log.step("SWITCH", f"Opening {city} ('{short}')")
 
+    # 1. Direct URL navigation if org_uuid is known
     if org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
-        Log.info(f"Navigating to {city} URL: {url}...")
+        Log.info(f"Direct navigating to {city} URL: {url}...")
         try:
             main_page.goto(url, timeout=45000, wait_until="domcontentloaded")
             Log.wait(4, f"Loading {city} promotions page")
             main_page = ensure_main_page(context, main_page)
             dismiss_banner(main_page)
 
-            exp_btn = main_page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
-            if exp_btn.is_visible(timeout=5000):
-                Log.ok(f"Direct URL verified for {city}!")
-                return main_page
+            if f"/orgs/{org_uuid}" in main_page.url:
+                exp_btn = main_page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
+                if exp_btn.is_visible(timeout=5000):
+                    Log.ok(f"Direct URL verified for {city} via Org UUID ({org_uuid})!")
+                    return main_page
         except Exception as e:
             Log.warn(f"Direct navigation note: {e}")
             main_page = ensure_main_page(context, main_page)
 
-    # Fallback to UI switcher
-    Log.info(f"Using Account Switcher UI for {city}...")
-    try:
-        main_page = ensure_main_page(context, main_page)
-        user_btn = main_page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
-        if user_btn.is_visible(timeout=4000):
+    # 2. UI Switcher Navigation with JS Progressive Container Scrolling
+    for attempt in range(1, 4):
+        Log.info(f"Attempt {attempt}/3: Opening Account Switcher UI for {city}...")
+        try:
+            main_page = ensure_main_page(context, main_page)
+            user_btn = main_page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
+            if not user_btn.is_visible(timeout=4000):
+                main_page.reload(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(3)
+                user_btn = main_page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
+
             user_btn.click()
             Log.wait(1, "Opening user menu")
-            
+
             sw_btn = main_page.locator('text="Switch account"').first
-            if sw_btn.is_visible(timeout=3000):
-                sw_btn.click()
-                Log.wait(2, "Opening account list")
+            if not sw_btn.is_visible(timeout=3000):
+                Log.warn(f"'Switch account' option not visible in user menu on attempt {attempt}")
+                continue
 
-                for query in [acct, short, f"SAMVREEDDHI MOBILITY {short}", f"Samvreeddhi Mobility Pvt Ltd {short}"]:
-                    opt = main_page.locator(f'text="{query}"').first
-                    if opt.is_visible(timeout=1500):
-                        try:
-                            opt.scroll_into_view_if_needed()
-                            opt.click()
-                            Log.ok(f"Selected {city} ({query}) from switcher")
-                            Log.wait(4, f"Loading {city} dashboard")
-                            break
-                        except Exception:
-                            pass
+            sw_btn.click()
+            Log.wait(2, "Opening account list")
 
-        main_page = ensure_main_page(context, main_page)
-        if "/promotions" not in main_page.url:
-            if "/orgs/" in main_page.url:
-                current_org = main_page.url.split("/orgs/")[1].split("/")[0]
-                promo_url = f"https://supplier.uber.com/orgs/{current_org}/promotions"
-                main_page.goto(promo_url, timeout=30000, wait_until="domcontentloaded")
-                Log.wait(3, f"Opening Promotions tab: {promo_url}")
+            # Progressive Scroll & Smart Item Search inside the Switcher Container
+            switch_result = main_page.evaluate("""(cityTarget) => {
+                const isTarget = (txt) => {
+                    const t = txt.toUpperCase();
+                    if (cityTarget === 'HYD') {
+                        // Match HYD P or Hyderabad P, strictly exclude HYD I, II, III, IV, V
+                        if (!t.includes('HYD') && !t.includes('HYDERABAD')) return false;
+                        if (!t.includes(' P') && !t.includes(' P.') && !t.includes(' PVT')) return false;
+                        if (t.includes('HYD I') || t.includes('HYD II') || t.includes('HYD III') || t.includes('HYD IV') || t.includes('HYD V')) return false;
+                        return true;
+                    } else if (cityTarget === 'MUM') {
+                        return (t.includes('MUM') || t.includes('MUMBAI')) && (t.includes(' P') || t.includes(' PVT')) && !t.includes('MUM I') && !t.includes('MUM II');
+                    } else if (cityTarget === 'BLR') {
+                        return (t.includes('BLR') || t.includes('BANGALORE')) && (t.includes(' P') || t.includes(' PVT'));
+                    }
+                    return false;
+                };
+
+                const allDivs = Array.from(document.querySelectorAll('div, ul, section'));
+                const containers = allDivs.filter(el => {
+                    const s = window.getComputedStyle(el);
+                    return (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
+                });
+                const container = containers[containers.length - 1];
+
+                // Scroll container to top first so items like HYD P are visible
+                if (container) container.scrollTop = 0;
+
+                const candidates = Array.from(document.querySelectorAll('div, li, button, span, [role="radio"], [role="menuitem"]'));
+                for (let el of candidates) {
+                    const txt = el.innerText ? el.innerText.trim() : '';
+                    if (isTarget(txt) && txt.length < 80) {
+                        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        el.click();
+                        return { success: true, matchedText: txt };
+                    }
+                }
+
+                if (container) {
+                    for (let pos = 100; pos <= container.scrollHeight; pos += 100) {
+                        container.scrollTop = pos;
+                        for (let el of candidates) {
+                            const txt = el.innerText ? el.innerText.trim() : '';
+                            if (isTarget(txt) && txt.length < 80) {
+                                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                el.click();
+                                return { success: true, matchedText: txt };
+                            }
+                        }
+                    }
+                }
+
+                return { success: false };
+            }""", code)
+
+            if switch_result.get("success"):
+                Log.ok(f"Switcher clicked item: '{switch_result.get('matchedText')}'")
+                time.sleep(6)  # Wait for navigation
+
+            main_page = ensure_main_page(context, main_page)
+            time.sleep(2)
+            current_url = main_page.url
+
+            new_org = None
+            if "/orgs/" in current_url:
+                new_org = current_url.split("/orgs/")[1].split("/")[0]
+
+            # Anti-contamination check:
+            if new_org and new_org not in previous_orgs:
+                Log.ok(f"SUCCESS: Switched to {city}! Active Org UUID: {new_org}")
+                save_cached_org_uuid(code, new_org)
+                target["org_uuid"] = new_org
+
+                promo_url = f"https://supplier.uber.com/orgs/{new_org}/promotions"
+                if "/promotions" not in main_page.url:
+                    main_page.goto(promo_url, timeout=30000, wait_until="domcontentloaded")
+                    time.sleep(3)
+
+                dismiss_banner(main_page)
+                return main_page
             else:
-                promo_tab = main_page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
-                if promo_tab.is_visible(timeout=3000):
-                    promo_tab.click()
-                    Log.wait(3, "Opening Promotions tab")
+                Log.warn(f"Org UUID ({new_org}) still matches previous city ({previous_orgs})! Retrying switcher...")
+                time.sleep(2)
 
-        dismiss_banner(main_page)
-        return main_page
+        except Exception as e:
+            Log.warn(f"Switcher attempt {attempt} note: {e}")
+            time.sleep(2)
 
-    except Exception as e:
-        Log.warn(f"Account switch note for {city}: {e}")
-        return ensure_main_page(context, main_page)
+    raise RuntimeError(f"FATAL: Failed to switch to {city}. URL is still on previous city org ({main_page.url}). Aborting export to prevent data contamination!")
 
 
-def export_and_download_city(context: BrowserContext, main_page: Page, target: dict, download_state: dict) -> Path:
+def export_and_download_city(context: BrowserContext, main_page: Page, target: dict, download_state: dict, seen_files: set = None) -> Path:
     main_page = ensure_main_page(context, main_page)
     city = target["city"]
     code = target["code"]
@@ -263,6 +360,9 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
         Log.err(f"Export button not visible on {city} Promotions page! (URL: {main_page.url})")
         return None
 
+    if seen_files is None:
+        seen_files = set()
+
     download_state["latest_file"] = None
     trigger_time = time.time()
     Log.info(f"Clicking 'Export' button for {city}...")
@@ -280,10 +380,12 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
+        # 1. Check download state from context listener — skip if already seen
         if download_state.get("latest_file") and download_state["latest_file"].exists():
-            if is_valid_incentive_file(download_state["latest_file"]):
-                found_file = download_state["latest_file"]
-                break
+            if str(download_state["latest_file"]) not in seen_files:
+                if is_valid_incentive_file(download_state["latest_file"]):
+                    found_file = download_state["latest_file"]
+                    break
 
         # 2. Scan OUT_DIR and USER_DL_DIR — catch .csv AND UUID-named files (no extension)
         for search_dir in [OUT_DIR, USER_DL_DIR]:
@@ -293,13 +395,17 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
                         continue
                     if f.suffix in [".crdownload", ".tmp", ".part"]:
                         continue
+                    if str(f) in seen_files:
+                        continue
                     try:
-                        if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
+                        # Strict trigger_time check
+                        if f.stat().st_mtime >= trigger_time and f.stat().st_size > 100:
                             if is_valid_incentive_file(f):
                                 dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
                                 if f != dest:
                                     shutil.copy2(str(f), str(dest))
                                 found_file = dest
+                                seen_files.add(str(f))
                                 break
                     except Exception:
                         pass
@@ -427,9 +533,11 @@ def main():
 
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
+        seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
+        previous_orgs: set = set()   # Track org UUIDs of prior cities — prevents export on wrong org
 
         for i, target in enumerate(TARGET_CITIES):
-            main_page = switch_to_city(context, main_page, target)
+            main_page = switch_to_city(context, main_page, target, previous_orgs)
             time.sleep(2)
             # Refresh page 3x before clicking Export to clear stale state / leftover popup artefacts
             Log.info(f"Refreshing page 3x before Export for {target['city']}...")
@@ -442,7 +550,7 @@ def main():
                     Log.warn(f"  Refresh {r} note: {e}")
             # Reset download state so previous city's late event is not picked up
             download_state["latest_file"] = None
-            csv_path = export_and_download_city(context, main_page, target, download_state)
+            csv_path = export_and_download_city(context, main_page, target, download_state, seen_files)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
@@ -450,6 +558,9 @@ def main():
                     all_city_dfs.append(df)
                 except Exception:
                     pass
+                # Record this city's org UUID so next city can't use it
+                if target.get("org_uuid"):
+                    previous_orgs.add(target["org_uuid"])
             # 30s cooldown between cities so popup tabs fully close and network settles
             if i < len(TARGET_CITIES) - 1:
                 Log.info(f"Cooldown: 30s after {target['city']} download before proceeding...")
