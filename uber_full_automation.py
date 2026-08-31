@@ -32,7 +32,7 @@ TARGET_CITIES = [
         "account_name": "SAMVREEDDHI MOBILITY Pvt. Ltd. BLR P",
         "short_name": "BLR P",
         "file_keyword": "BLR_P",
-        "max_wait_seconds": 900  # 15 mins for 20,847+ rows
+        "max_wait_seconds": 1200  # 20 mins for large 20,847+ row fleet
     },
     {
         "city": "Mumbai",
@@ -41,7 +41,7 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt. Ltd. MUM P",
         "short_name": "MUM P",
         "file_keyword": "MUM_P",
-        "max_wait_seconds": 600  # 10 mins
+        "max_wait_seconds": 900  # 15 mins
     },
     {
         "city": "Hyderabad",
@@ -50,7 +50,7 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
         "file_keyword": "HYD_P",
-        "max_wait_seconds": 600  # 10 mins
+        "max_wait_seconds": 900  # 15 mins
     }
 ]
 

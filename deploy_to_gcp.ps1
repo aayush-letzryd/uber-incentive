@@ -46,21 +46,22 @@ gcloud run jobs deploy $JobName `
     --project $ProjectId `
     --memory 4Gi `
     --cpu 2 `
-    --task-timeout 1800s `
-    --max-retries 1 `
+    --task-timeout 3600s `
+    --max-retries 0 `
     --set-env-vars="GCS_BUCKET_NAME=$BucketName,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com"
 
-# 5. Create Cloud Scheduler (4 Attempt Triggers: 7:00, 8:00, 9:00, 10:00 AM IST)
+# 5. Create Cloud Scheduler (4 Attempt Triggers: 7:00 AM, 9:00 AM, 11:00 AM, 1:00 PM IST)
+# Allows each run up to 45-60 mins to complete full 3-city exports
 # Cron in UTC:
 # 07:00 AM IST = 01:30 AM UTC
-# 08:00 AM IST = 02:30 AM UTC
 # 09:00 AM IST = 03:30 AM UTC
-# 10:00 AM IST = 04:30 AM UTC
+# 11:00 AM IST = 05:30 AM UTC
+# 01:00 PM IST = 07:30 AM UTC
 $Schedules = @(
     @{ Name = "uber-incentives-07am"; Cron = "30 1 * * *"; Time = "07:00 AM IST (Attempt 1)" },
-    @{ Name = "uber-incentives-08am"; Cron = "30 2 * * *"; Time = "08:00 AM IST (Attempt 2 - Retry)" },
-    @{ Name = "uber-incentives-09am"; Cron = "30 3 * * *"; Time = "09:00 AM IST (Attempt 3 - Retry)" },
-    @{ Name = "uber-incentives-10am"; Cron = "30 4 * * *"; Time = "10:00 AM IST (Attempt 4 - Final)" }
+    @{ Name = "uber-incentives-09am"; Cron = "30 3 * * *"; Time = "09:00 AM IST (Attempt 2 - Retry)" },
+    @{ Name = "uber-incentives-11am"; Cron = "30 5 * * *"; Time = "11:00 AM IST (Attempt 3 - Retry)" },
+    @{ Name = "uber-incentives-01pm"; Cron = "30 7 * * *"; Time = "01:00 PM IST (Attempt 4 - Final)" }
 )
 
 foreach ($sched in $Schedules) {
