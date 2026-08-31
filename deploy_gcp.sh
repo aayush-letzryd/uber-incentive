@@ -106,24 +106,33 @@ if [ -f ".env.secrets" ]; then
     source .env.secrets
 fi
 
-if [ -z "$PG_PASSWORD" ] || [ -z "$UBER_PASSWORD" ] || [ -z "$SMTP_PASSWORD" ]; then
-    echo ""
-    echo "⚠️  SECRETS REQUIRED: PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD not found."
-    echo "   Create a '.env.secrets' file with:"
-    echo "     PG_PASSWORD=your_pg_password"
-    echo "     UBER_PASSWORD=your_uber_password"
-    echo "     SMTP_PASSWORD=your_smtp_app_password"
-    echo "   OR export them as environment variables before running this script."
-    echo ""
-    read -r -s -p "Enter PG_PASSWORD: " PG_PASSWORD && echo
-    read -r -s -p "Enter UBER_PASSWORD: " UBER_PASSWORD && echo
-    read -r -s -p "Enter SMTP_PASSWORD: " SMTP_PASSWORD && echo
-fi
+# Check if secrets already exist in GCP Secret Manager
+all_secrets_exist=true
+for sec in PG_PASSWORD UBER_PASSWORD SMTP_PASSWORD; do
+    if ! gcloud secrets describe "$sec" --project="$PROJECT_ID" >/dev/null 2>&1; then
+        all_secrets_exist=false
+        break
+    fi
+done
 
-create_or_update_secret "PG_PASSWORD"   "$PG_PASSWORD"
-create_or_update_secret "UBER_PASSWORD" "$UBER_PASSWORD"
-create_or_update_secret "SMTP_PASSWORD" "$SMTP_PASSWORD"
-echo "✅ Secrets stored in GCP Secret Manager (removed from source code)"
+if [ "$all_secrets_exist" = true ] && [ -z "$PG_PASSWORD" ] && [ -z "$UBER_PASSWORD" ] && [ -z "$SMTP_PASSWORD" ]; then
+    echo "   -> ✅ Verified existing secrets (PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD) in Secret Manager."
+else
+    if [ -z "$PG_PASSWORD" ] || [ -z "$UBER_PASSWORD" ] || [ -z "$SMTP_PASSWORD" ]; then
+        echo ""
+        echo "⚠️  SECRETS SETUP: Missing credentials for Secret Manager."
+        echo "   Enter credentials below (or save in .env.secrets to skip prompts):"
+        echo ""
+        [ -z "$PG_PASSWORD" ] && read -r -s -p "Enter PG_PASSWORD: " PG_PASSWORD && echo
+        [ -z "$UBER_PASSWORD" ] && read -r -s -p "Enter UBER_PASSWORD: " UBER_PASSWORD && echo
+        [ -z "$SMTP_PASSWORD" ] && read -r -s -p "Enter SMTP_PASSWORD: " SMTP_PASSWORD && echo
+    fi
+
+    [ -n "$PG_PASSWORD" ] && create_or_update_secret "PG_PASSWORD"   "$PG_PASSWORD"
+    [ -n "$UBER_PASSWORD" ] && create_or_update_secret "UBER_PASSWORD" "$UBER_PASSWORD"
+    [ -n "$SMTP_PASSWORD" ] && create_or_update_secret "SMTP_PASSWORD" "$SMTP_PASSWORD"
+    echo "✅ Secrets stored in GCP Secret Manager (removed from source code)"
+fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 # 5. Create Artifact Registry Docker Repository if not exists

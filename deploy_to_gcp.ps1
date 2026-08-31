@@ -96,24 +96,38 @@ if (Test-Path ".env.secrets") {
     }
 }
 
-if (-not $PgPass -or -not $UberPass -or -not $SmtpPass) {
-    Write-Host "`n[!] Secrets required (PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD)." -ForegroundColor Yellow
-    if (-not $PgPass) { $PgPass = Read-Host -Prompt "Enter PG_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
-    if (-not $UberPass) { $UberPass = Read-Host -Prompt "Enter UBER_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
-    if (-not $SmtpPass) { $SmtpPass = Read-Host -Prompt "Enter SMTP_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
-}
-
-function Set-GcpSecret($name, $val) {
-    gcloud secrets describe $name --project $ProjectId 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        $val | gcloud secrets versions add $name --data-file=- --project $ProjectId
-    } else {
-        $val | gcloud secrets create $name --data-file=- --replication-policy="automatic" --project $ProjectId
+# Check if secrets already exist in GCP Secret Manager
+$AllSecretsExist = $true
+foreach ($sec in @("PG_PASSWORD", "UBER_PASSWORD", "SMTP_PASSWORD")) {
+    gcloud secrets describe $sec --project $ProjectId 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $AllSecretsExist = $false
+        break
     }
 }
-Set-GcpSecret "PG_PASSWORD" $PgPass
-Set-GcpSecret "UBER_PASSWORD" $UberPass
-Set-GcpSecret "SMTP_PASSWORD" $SmtpPass
+
+if ($AllSecretsExist -and -not $PgPass -and -not $UberPass -and -not $SmtpPass) {
+    Write-Host "   -> [i] Verified existing secrets (PG_PASSWORD, UBER_PASSWORD, SMTP_PASSWORD) in Secret Manager." -ForegroundColor Green
+} else {
+    if (-not $PgPass -or -not $UberPass -or -not $SmtpPass) {
+        Write-Host "`n[!] Missing credentials for Secret Manager." -ForegroundColor Yellow
+        if (-not $PgPass) { $PgPass = Read-Host -Prompt "Enter PG_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+        if (-not $UberPass) { $UberPass = Read-Host -Prompt "Enter UBER_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+        if (-not $SmtpPass) { $SmtpPass = Read-Host -Prompt "Enter SMTP_PASSWORD" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) } }
+    }
+
+    function Set-GcpSecret($name, $val) {
+        gcloud secrets describe $name --project $ProjectId 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $val | gcloud secrets versions add $name --data-file=- --project $ProjectId
+        } else {
+            $val | gcloud secrets create $name --data-file=- --replication-policy="automatic" --project $ProjectId
+        }
+    }
+    if ($PgPass) { Set-GcpSecret "PG_PASSWORD" $PgPass }
+    if ($UberPass) { Set-GcpSecret "UBER_PASSWORD" $UberPass }
+    if ($SmtpPass) { Set-GcpSecret "SMTP_PASSWORD" $SmtpPass }
+}
 
 # 5. Ensure Artifact Registry Repository exists
 Write-Host "`n[*] 5. Ensuring Artifact Registry: $RepoName..." -ForegroundColor Yellow
