@@ -272,12 +272,9 @@ def save_cached_org_uuid(code: str, uuid: str):
 
 
 # ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
-# DO NOT hardcode credentials here — inject via Secret Manager in deploy_gcp.sh
-UBER_EMAIL    = os.getenv("UBER_EMAIL", "")      # Set via: --set-env-vars UBER_EMAIL=...
+UBER_EMAIL    = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
 UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")   # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
-SHEET_ID      = os.getenv("SHEET_ID", "")        # Set via: --set-env-vars SHEET_ID=...
-if not UBER_EMAIL:
-    raise RuntimeError("UBER_EMAIL environment variable is required but not set.")
+SHEET_ID      = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0" if SHEET_ID else ""
 
 

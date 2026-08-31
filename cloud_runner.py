@@ -208,14 +208,14 @@ def clean_timestamp(val):
         return None
     try:
         s = str(val).strip()
-        # Try strict DD/MM/YYYY first (Uber India format e.g. "01/09/2026")
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
+        # Try strict date formats first (Uber India format e.g. "01/09/2026", ISO, etc.)
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d", "%d %b %Y", "%d %B %Y"):
             try:
                 return datetime.datetime.strptime(s[:10], fmt).strftime("%Y-%m-%d 00:00:00")
             except ValueError:
                 continue
         # Fallback to pandas parser
-        ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        ts = pd.to_datetime(s, errors="coerce")
         if pd.isna(ts):
             return None
         return ts.strftime("%Y-%m-%d %H:%M:%S")
