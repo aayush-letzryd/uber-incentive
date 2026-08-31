@@ -145,6 +145,22 @@ def load_session(context: BrowserContext) -> bool:
     return False
 
 
+def verify_session_active(page: Page) -> bool:
+    """Pre-flight check: navigate to Uber Supplier and confirm session is live."""
+    try:
+        Log.info("Pre-flight: Verifying session is active on Uber Supplier Portal...")
+        page.goto("https://supplier.uber.com", timeout=20000, wait_until="domcontentloaded")
+        time.sleep(4)
+        if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+            Log.ok(f"✅ Session pre-flight passed. Active on: {page.url}")
+            return True
+        Log.warn(f"❌ Session pre-flight failed — redirected to: {page.url}")
+        return False
+    except Exception as e:
+        Log.warn(f"Session pre-flight note: {e}")
+        return False
+
+
 def dismiss_banner(page: Page):
     try:
         if not page.is_closed():
@@ -193,9 +209,11 @@ def save_cached_org_uuid(code: str, uuid: str):
         Log.warn(f"Note saving org UUID: {e}")
 
 
-UBER_EMAIL = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
-UBER_PASSWORD = os.getenv("UBER_PASSWORD", "Letzuberp123")
-SHEET_ID = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
+# ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
+# DO NOT hardcode credentials here — inject via Secret Manager in deploy_gcp.sh
+UBER_EMAIL    = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")  # email is fine to default
+UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")                     # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
+SHEET_ID      = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 
 
@@ -625,10 +643,27 @@ def export_and_download_city(context: BrowserContext, main_page: Page, target: d
     except Exception:
         exp_btn.click(force=True)
 
+    # ── Fix #3: Verify export was actually triggered (toast / button state) ──
+    time.sleep(2)
+    try:
+        confirmed = main_page.locator(
+            'text="Generating", text="Processing", text="Export in progress",'
+            '[data-testid*="toast"], [class*="toast"], [role="alert"]'
+        ).first
+        if confirmed.is_visible(timeout=4000):
+            Log.ok(f"✅ Export confirmed — Uber acknowledged the request for {city}.")
+        else:
+            Log.warn(f"No export confirmation toast visible — retrying click once for {city}...")
+            exp_btn.click(force=True)
+            time.sleep(2)
+    except Exception:
+        pass  # Toast check is best-effort — continue polling regardless
+    # ────────────────────────────────────────────────────────────────────────
+
     Log.ok(f"Export triggered! Monitoring download (up to {max_wait//60} mins)...")
 
     start_time = time.time()
-    last_log = time.time()
+    last_log = time.time() - 5  # First log fires at 10s, not 15s (Fix #10)
     found_file = None
 
     while time.time() - start_time < max_wait:
@@ -787,6 +822,15 @@ def main():
 
         load_session(context)
 
+        # ── PRE-FLIGHT SESSION CHECK (Fix #1) ──────────────────────────────
+        # Validate cookies are still live BEFORE entering city loop.
+        # If session expired, trigger login immediately so city 1 doesn't waste 3 mins.
+        if not verify_session_active(main_page):
+            Log.warn("Session cookies expired or invalid. Triggering automated login now...")
+            if not ensure_login(main_page, context):
+                raise RuntimeError("Pre-flight login failed. Cannot proceed without authenticated session.")
+        # ───────────────────────────────────────────────────────────────────
+
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
         seen_files: set = set()      # Track files claimed by previous cities — prevents cross-contamination
@@ -795,13 +839,23 @@ def main():
         for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city(context, main_page, target, previous_orgs)
             time.sleep(2)
-            # 1 Clean page refresh + 7s DOM stabilization wait before clicking Export
+            # ── 1 Clean page refresh + 7s DOM stabilization (Fix #6) ────────────
             Log.info(f"Performing 1 clean page refresh for {target['city']}...")
             try:
                 main_page.reload(wait_until="domcontentloaded", timeout=30000)
                 Log.info(f"  Reload complete. Stabilizing DOM for 7s before clicking Export...")
                 time.sleep(7)
                 Log.ok(f"  DOM fully hydrated and ready!")
+                # ── Post-reload session guard ─────────────────────────────────
+                if "auth.uber.com" in main_page.url:
+                    Log.warn(f"Session dropped during {target['city']} reload! Re-logging in...")
+                    if ensure_login(main_page, context):
+                        org_uuid = target.get("org_uuid", "")
+                        if org_uuid:
+                            main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions",
+                                           timeout=30000, wait_until="domcontentloaded")
+                            time.sleep(5)
+                # ─────────────────────────────────────────────────────────────
             except Exception as e:
                 Log.warn(f"  Refresh note: {e}")
                 time.sleep(3)

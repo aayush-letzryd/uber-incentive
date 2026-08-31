@@ -6,6 +6,8 @@ __pycache__/
 # Environment and secrets
 .env
 *.env
+cookies_b64.txt        # base64-encoded session dump — never commit
+*.b64                  # any other base64 credential files
 
 # Chrome user profiles
 uber_chrome_profile/

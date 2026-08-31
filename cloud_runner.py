@@ -49,11 +49,13 @@ STATE_BLOB_NAME = "pipeline_state.json"
 COOKIES_BLOB_NAME = "session/cookies.json"
 STORAGE_STATE_BLOB_NAME = "session/storage_state.json"
 
-PG_HOST = os.getenv("PG_HOST", "35.200.196.113")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
+# ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
+# DO NOT add hardcoded fallback values here — inject via Secret Manager in deploy_gcp.sh
+PG_HOST     = os.getenv("PG_HOST", "35.200.196.113")
+PG_PORT     = int(os.getenv("PG_PORT", "5432"))
 PG_DATABASE = os.getenv("PG_DATABASE", "postgres")
-PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "8S5]U3@L^Xz)\\FH}")
+PG_USER     = os.getenv("PG_USER", "postgres")
+PG_PASSWORD = os.getenv("PG_PASSWORD", "")   # Set via: --set-secrets PG_PASSWORD=PG_PASSWORD:latest
 
 RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
 
@@ -403,8 +405,6 @@ def run_pipeline():
         print("\n[*] Invoking Uber Full Automation Engine...")
         uber_full_automation.main()
 
-        sync_cookies_to_gcs()
-
         # Check output directory strictly for today's generated master report
         master_files = [
             f for f in OUT_DIR.glob(f"*{today_compact}*ALL_3_CITIES.xlsx")
@@ -428,6 +428,22 @@ def run_pipeline():
         if total_rows == 0:
             raise RuntimeError("Generated Master Excel is empty (0 rows).")
 
+        # ── Fix #5: Extract real date window from CSV data (not just today_str) ──
+        date_window_start = today_str
+        date_window_end = today_str
+        try:
+            df_cols = [c.strip().lower() for c in master_df.columns]
+            start_col = next((c for c in master_df.columns if "start" in c.lower() and "date" in c.lower()), None)
+            end_col   = next((c for c in master_df.columns if "end" in c.lower() and "date" in c.lower()), None)
+            if start_col:
+                date_window_start = str(pd.to_datetime(master_df[start_col], errors="coerce").min().date())
+            if end_col:
+                date_window_end   = str(pd.to_datetime(master_df[end_col],   errors="coerce").max().date())
+            print(f"[*] Date Window: {date_window_start} → {date_window_end}")
+        except Exception as e:
+            print(f"[!] Date window parse note: {e} — using today_str as fallback")
+        # ─────────────────────────────────────────────────────────────────────────
+
         # Ingest into PostgreSQL
         ingested_count = upsert_master_to_postgres(master_path)
 
@@ -447,8 +463,8 @@ def run_pipeline():
             today_str=today_str,
             attempt=current_attempt,
             status="SUCCESS",
-            start_dt=today_str,
-            end_dt=today_str,
+            start_dt=date_window_start,   # Fix #5: real date range from CSV
+            end_dt=date_window_end,
             blr_rows=blr_rows,
             mum_rows=mum_rows,
             hyd_rows=hyd_rows,
@@ -462,7 +478,7 @@ def run_pipeline():
 
         # Send LetzRyd Success Email
         send_success_email(
-            date_window=today_str,
+            date_window=f"{date_window_start} → {date_window_end}",
             blr_rows=blr_rows,
             mum_rows=mum_rows,
             hyd_rows=hyd_rows,
@@ -484,6 +500,14 @@ def run_pipeline():
     except Exception as e:
         error_reason = str(e)
         print(f"[-] Execution error during attempt {current_attempt}: {e}", flush=True)
+
+    finally:
+        # ── Fix #2: Always sync cookies back to GCS ──────────────────────────
+        # Even if export fails, fresh login cookies must be preserved
+        # so the next retry attempt doesn't start with expired credentials.
+        print("[*] Syncing any fresh session cookies back to GCS (always-run)...")
+        sync_cookies_to_gcs()
+        # ────────────────────────────────────────────────────────────────────
 
     if not success:
         duration_sec = time.time() - start_time

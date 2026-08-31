@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# LETZRYD · UBER INCENTIVES GCP CLOUD SHELL DEPLOYMENT SCRIPT (PRODUCTION v4.3)
+# LETZRYD · UBER INCENTIVES GCP CLOUD SHELL DEPLOYMENT SCRIPT (PRODUCTION v4.4)
 # Uses modern GCP Artifact Registry (asia-south1-docker.pkg.dev)
+# Secrets (passwords) injected via GCP Secret Manager — NOT hardcoded here
 # ==============================================================================
 
 set -e
@@ -11,7 +12,6 @@ REGION="asia-south1"
 JOB_NAME="uber-incentives-job"
 REPO_NAME="letzryd-docker"
 BUCKET_NAME="letzryd-uber-reports"
-DB_URL="postgresql://postgres:8S5%5DU3%40L%5EXz%29%5CFH%7D@35.200.196.113:5432/postgres"
 
 if [ -z "$PROJECT_ID" ]; then
     echo "❌ Error: No active GCP project configured in gcloud."
@@ -33,6 +33,7 @@ gcloud services enable \
     cloudbuild.googleapis.com \
     storage.googleapis.com \
     iam.googleapis.com \
+    secretmanager.googleapis.com \
     --project "$PROJECT_ID"
 
 # 2. Configure Service Account Permissions
@@ -49,6 +50,14 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/storage.objectAdmin" \
     --condition=None >/dev/null 2>&1 || true
+
+# ── Fix #7/#9: Grant Secret Manager access to the SA ─────────────────────────
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/secretmanager.secretAccessor" \
+    --condition=None >/dev/null 2>&1 || true
+echo "✅ Secret Manager accessor role granted to $SA_EMAIL"
+# ─────────────────────────────────────────────────────────────────────────────
 
 # 3. Create Cloud Storage Bucket
 echo -e "\n[*] 3. Ensuring Cloud Storage Bucket exists: gs://$BUCKET_NAME..."
@@ -71,6 +80,26 @@ if [ -f "storage_state.json" ]; then
     echo "🔑 Synced storage_state.json to gs://$BUCKET_NAME/session/ and sessions/"
 fi
 
+# ── Fix #7/#9: Create Secrets in GCP Secret Manager ─────────────────────────
+echo -e "\n[*] 4a. Setting up GCP Secrets (PG_PASSWORD, UBER_PASSWORD)..."
+
+create_or_update_secret() {
+    local SECRET_NAME="$1"
+    local SECRET_VALUE="$2"
+    if gcloud secrets describe "$SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
+        echo "   -> Updating secret: $SECRET_NAME"
+        echo -n "$SECRET_VALUE" | gcloud secrets versions add "$SECRET_NAME" --data-file=- --project="$PROJECT_ID"
+    else
+        echo "   -> Creating secret: $SECRET_NAME"
+        echo -n "$SECRET_VALUE" | gcloud secrets create "$SECRET_NAME" --data-file=- --replication-policy="automatic" --project="$PROJECT_ID"
+    fi
+}
+
+create_or_update_secret "PG_PASSWORD"    "8S5]U3@L^Xz)\FH}"
+create_or_update_secret "UBER_PASSWORD"  "Letzuberp123"
+echo "✅ Secrets stored in GCP Secret Manager (removed from source code)"
+# ─────────────────────────────────────────────────────────────────────────────
+
 # 5. Create Artifact Registry Docker Repository if not exists
 echo -e "\n[*] 5. Ensuring Artifact Registry Repository exists: $REPO_NAME in $REGION..."
 if ! gcloud artifacts repositories describe "$REPO_NAME" --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
@@ -89,7 +118,7 @@ IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$JOB_NAME:latest"
 echo -e "\n[*] 6. Building Container Image with Cloud Build: $IMAGE_TAG..."
 gcloud builds submit --tag "$IMAGE_TAG" --project "$PROJECT_ID"
 
-# 7. Deploy Cloud Run Job
+# 7. Deploy Cloud Run Job (secrets injected via Secret Manager, NOT env vars)
 echo -e "\n[*] 7. Deploying Cloud Run Job: $JOB_NAME..."
 gcloud run jobs deploy "$JOB_NAME" \
     --image "$IMAGE_TAG" \
@@ -99,7 +128,8 @@ gcloud run jobs deploy "$JOB_NAME" \
     --cpu 2 \
     --task-timeout 3600s \
     --max-retries 0 \
-    --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,DATABASE_URL=$DB_URL,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true"
+    --set-env-vars="GCS_BUCKET_NAME=$BUCKET_NAME,PYTHONIOENCODING=utf-8,EMAIL_RECIPIENTS=vendor_aayush@letzryd.com,HEADLESS=true,PG_HOST=35.200.196.113,PG_PORT=5432,PG_DATABASE=postgres,PG_USER=postgres" \
+    --set-secrets="PG_PASSWORD=PG_PASSWORD:latest,UBER_PASSWORD=UBER_PASSWORD:latest"
 
 # 8. Create / Update 4 Cloud Schedulers (IST Timezone)
 echo -e "\n[*] 8. Configuring 4-Tier Cloud Schedulers (7:00, 8:10, 9:10, 10:10 AM IST)..."
