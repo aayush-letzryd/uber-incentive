@@ -272,6 +272,75 @@ def save_session_state(context: BrowserContext):
         Log.warn(f"Note saving session: {e}")
 
 
+def login_with_google(page: Page, context: BrowserContext) -> bool:
+    Log.step("GOOGLE_AUTH", "Attempting Login via Google Account OAuth...")
+    init_code, init_date, _ = get_current_sheet_state()
+    try:
+        google_btn = page.locator('button:has-text("Continue with Google"), button:has-text("Google"), [data-testid*="google"]').first
+        if google_btn.is_visible(timeout=5000):
+            Log.info("Clicking 'Continue with Google'...")
+            google_btn.click()
+            time.sleep(4)
+
+        # 1. Google Email
+        g_email = page.locator('input[type="email"], input#identifierId').first
+        if g_email.is_visible(timeout=6000):
+            Log.info(f"Entering Google email: {UBER_EMAIL}")
+            g_email.fill("")
+            g_email.type(UBER_EMAIL, delay=30)
+            time.sleep(0.5)
+            next_btn = page.locator('#identifierNext button, button:has-text("Next")').first
+            if next_btn.is_visible():
+                next_btn.click()
+            else:
+                page.keyboard.press("Enter")
+            time.sleep(5)
+
+        # 2. Google Password
+        g_pwd = page.locator('input[type="password"], input[name="Passwd"]').first
+        if g_pwd.is_visible(timeout=8000):
+            Log.info("Entering Google password...")
+            g_pwd.fill("")
+            g_pwd.type(UBER_PASSWORD, delay=30)
+            time.sleep(0.5)
+            next_btn = page.locator('#passwordNext button, button:has-text("Next")').first
+            if next_btn.is_visible():
+                next_btn.click()
+            else:
+                page.keyboard.press("Enter")
+            time.sleep(6)
+
+        # 3. Google 2FA / Gmail OTP Verification
+        if any(w in page.content().lower() for w in ["verification code", "2-step", "enter code", "get a verification"]):
+            Log.info("Google 2-Step Verification detected. Polling Google Sheet for OTP...")
+            otp = poll_for_new_otp(init_date, init_code, timeout_seconds=90)
+            if not otp:
+                otp, _, _ = get_current_sheet_state()
+            if otp:
+                Log.ok(f"Entering Google OTP: {otp}")
+                otp_input = page.locator('input#idvPin, input[type="tel"], input[name="Pin"]').first
+                if otp_input.is_visible(timeout=4000):
+                    otp_input.fill(otp)
+                    time.sleep(0.5)
+                    next_btn = page.locator('#idvPreregisteredPhoneNext button, button:has-text("Next")').first
+                    if next_btn.is_visible():
+                        next_btn.click()
+                    else:
+                        page.keyboard.press("Enter")
+                    time.sleep(6)
+
+        # 4. Wait for redirect back to supplier.uber.com
+        for _ in range(15):
+            if "supplier.uber.com" in page.url and "accounts.google.com" not in page.url and "auth.uber.com" not in page.url:
+                Log.ok(f"🎉 Google OAuth Login successful! Landed on: {page.url}")
+                save_session_state(context)
+                return True
+            time.sleep(2)
+    except Exception as e:
+        Log.warn(f"Google login flow note: {e}")
+    return False
+
+
 def ensure_login(page: Page, context: BrowserContext) -> bool:
     time.sleep(3)
     if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
@@ -279,13 +348,13 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         save_session_state(context)
         return True
 
-    Log.step("AUTH", "Automated Uber Login with Google Sheet OTP...")
+    Log.step("AUTH", "Automated Uber Login Engine (Password / SMS OTP / Google OAuth)...")
     init_code, init_date, _ = get_current_sheet_state()
 
-    # 1. Email
+    # Strategy 1: Standard Uber Email + Password / SMS OTP
     try:
         email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS').first
-        if email_input.is_visible(timeout=5000):
+        if email_input.is_visible(timeout=4000):
             Log.info(f"Entering login email: {UBER_EMAIL}")
             email_input.fill("")
             email_input.type(UBER_EMAIL, delay=30)
@@ -296,68 +365,74 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
             else:
                 page.keyboard.press("Enter")
             time.sleep(4)
-    except Exception as e:
-        Log.warn(f"Email step note: {e}")
 
-    # 2. Password or More Options
-    pwd_inputs = page.locator('input[type="password"]')
-    if pwd_inputs.count() > 0 and pwd_inputs.first.is_visible():
-        Log.info("Entering password directly...")
-        pwd_inputs.first.fill("")
-        pwd_inputs.first.type(UBER_PASSWORD, delay=30)
-        time.sleep(0.5)
-        submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
-        if submit_btn.is_visible():
-            submit_btn.click()
+        # Password or More Options
+        pwd_inputs = page.locator('input[type="password"]')
+        if pwd_inputs.count() > 0 and pwd_inputs.first.is_visible():
+            Log.info("Entering password directly...")
+            pwd_inputs.first.fill("")
+            pwd_inputs.first.type(UBER_PASSWORD, delay=30)
+            time.sleep(0.5)
+            submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+            if submit_btn.is_visible():
+                submit_btn.click()
+            else:
+                page.keyboard.press("Enter")
+            time.sleep(5)
         else:
-            page.keyboard.press("Enter")
-        time.sleep(5)
-    else:
-        more_opts = page.get_by_text("More options", exact=False).first
-        if more_opts.is_visible(timeout=4000):
-            Log.info("Clicking 'More options'...")
-            more_opts.click()
-            time.sleep(2)
-
-            see_all = page.get_by_text("See all options", exact=False).first
-            if see_all.is_visible(timeout=2000):
-                see_all.click()
+            more_opts = page.get_by_text("More options", exact=False).first
+            if more_opts.is_visible(timeout=3000):
+                Log.info("Clicking 'More options'...")
+                more_opts.click()
                 time.sleep(2)
 
-            pwd_option = page.get_by_text("Password", exact=True).first
-            if not pwd_option.is_visible(timeout=2000):
-                pwd_option = page.locator('div[role="dialog"] >> text="Password"').first
+                see_all = page.get_by_text("See all options", exact=False).first
+                if see_all.is_visible(timeout=2000):
+                    see_all.click()
+                    time.sleep(2)
 
-            if pwd_option.is_visible(timeout=3000):
-                Log.info("Selecting 'Password' option...")
-                pwd_option.click()
-                time.sleep(2.5)
+                pwd_option = page.get_by_text("Password", exact=True).first
+                if not pwd_option.is_visible(timeout=2000):
+                    pwd_option = page.locator('div[role="dialog"] >> text="Password"').first
 
-                pwd_input = page.locator('input[type="password"]').first
-                if pwd_input.is_visible(timeout=5000):
-                    Log.info("Entering password...")
-                    pwd_input.fill("")
-                    pwd_input.type(UBER_PASSWORD, delay=30)
-                    time.sleep(0.5)
-                    submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
-                    if submit_btn.is_visible():
-                        submit_btn.click()
-                    else:
-                        page.keyboard.press("Enter")
-                    time.sleep(6)
+                if pwd_option.is_visible(timeout=3000):
+                    Log.info("Selecting 'Password' option...")
+                    pwd_option.click()
+                    time.sleep(2.5)
 
-    # 3. 2FA OTP if prompted
-    time.sleep(2)
-    if "code" in page.content().lower() or page.locator('input[type="tel"]').count() > 0 or "verification" in page.content().lower():
-        handle_otp_input(page, init_date, init_code)
+                    pwd_input = page.locator('input[type="password"]').first
+                    if pwd_input.is_visible(timeout=5000):
+                        Log.info("Entering password...")
+                        pwd_input.fill("")
+                        pwd_input.type(UBER_PASSWORD, delay=30)
+                        time.sleep(0.5)
+                        submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+                        if submit_btn.is_visible():
+                            submit_btn.click()
+                        else:
+                            page.keyboard.press("Enter")
+                        time.sleep(6)
 
-    # 4. Wait for landing on supplier portal
-    for _ in range(15):
-        if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
-            Log.ok(f"🎉 Successfully logged in! Landed on: {page.url}")
-            save_session_state(context)
-            return True
+        # 2FA SMS OTP if prompted
         time.sleep(2)
+        if "code" in page.content().lower() or page.locator('input[type="tel"]').count() > 0 or "verification" in page.content().lower():
+            handle_otp_input(page, init_date, init_code)
+
+        # Check if logged in
+        for _ in range(8):
+            if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+                Log.ok(f"🎉 Successfully logged in via standard auth! Landed on: {page.url}")
+                save_session_state(context)
+                return True
+            time.sleep(2)
+    except Exception as e:
+        Log.warn(f"Standard auth note: {e}")
+
+    # Strategy 2: Fallback to Google Account OAuth
+    if "auth.uber.com" in page.url or "accounts.google.com" in page.url:
+        Log.warn("Standard login not confirmed. Initiating Google Account OAuth fallback...")
+        if login_with_google(page, context):
+            return True
 
     return "supplier.uber.com" in page.url and "auth.uber.com" not in page.url
 
