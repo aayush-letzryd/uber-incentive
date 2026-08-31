@@ -48,7 +48,7 @@ TARGET_CITIES = [
     {
         "city": "Hyderabad",
         "code": "HYD",
-        "org_uuid": None,
+        "org_uuid": "f7d7968b-43fe-4c15-bfc8-30a82c8ad5b9",
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
         "file_keyword": "HYD_P",
