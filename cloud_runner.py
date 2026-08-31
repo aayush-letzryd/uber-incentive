@@ -276,7 +276,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             total_payout,
             status,
             driver_trip_count_breakdown,
-            updated_at
+            ingested_at
         ) VALUES %s
         ON CONFLICT (city, number_plate, start_date, end_date, trip_target)
         DO UPDATE SET
@@ -287,7 +287,7 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             total_payout = EXCLUDED.total_payout,
             status = EXCLUDED.status,
             driver_trip_count_breakdown = EXCLUDED.driver_trip_count_breakdown,
-            updated_at = EXCLUDED.updated_at;
+            ingested_at = EXCLUDED.ingested_at;
         """
 
         cur = conn.cursor()

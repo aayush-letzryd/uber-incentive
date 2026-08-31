@@ -179,7 +179,7 @@ def load_cached_org_uuids() -> dict:
     return {
         "BLR": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
         "MUM": "44cb587c-a690-44b5-94c2-37539500c7d5",
-        "HYD": None
+        "HYD": "f7d7968b-43fe-4c15-bfc8-30a82c8ad5b9"
     }
 
 
