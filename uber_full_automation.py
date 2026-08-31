@@ -134,14 +134,49 @@ def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
 
 
 def load_session(context: BrowserContext) -> bool:
+    loaded = False
     if COOKIES_F.exists():
         try:
             cookies = json.loads(COOKIES_F.read_text(encoding="utf-8"))
-            context.add_cookies(cookies)
-            Log.ok(f"Loaded {len(cookies)} cached session cookies")
-            return True
+            if isinstance(cookies, list) and cookies:
+                context.add_cookies(cookies)
+                Log.ok(f"Loaded {len(cookies)} cached session cookies from {COOKIES_F.name}")
+                loaded = True
         except Exception as e:
             Log.warn(f"Cookie load note: {e}")
+
+    if STATE_F.exists():
+        try:
+            state_data = json.loads(STATE_F.read_text(encoding="utf-8"))
+            if isinstance(state_data, dict) and "cookies" in state_data:
+                context.add_cookies(state_data["cookies"])
+                Log.ok(f"Loaded {len(state_data['cookies'])} session cookies from {STATE_F.name}")
+                loaded = True
+        except Exception as e:
+            Log.warn(f"State load note: {e}")
+
+    return loaded
+
+
+def is_login_required(page: Page) -> bool:
+    """Checks whether the current page is an authentication / login challenge."""
+    try:
+        url = page.url.lower()
+        if any(auth_term in url for auth_term in [
+            "auth.uber.com", "login.uber.com", "accounts.google.com",
+            "/login", "/sign-in", "action=signin", "openid", "identity"
+        ]):
+            return True
+        # Check if page has email/phone input or sign in buttons
+        auth_loc = page.locator(
+            'input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"], input[type="email"], '
+            'button:has-text("Continue with Google"), a[href*="/login"], button:has-text("Log in"), '
+            'button:has-text("Sign in"), input[type="password"]'
+        ).first
+        if auth_loc.is_visible(timeout=1500):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -149,12 +184,24 @@ def verify_session_active(page: Page) -> bool:
     """Pre-flight check: navigate to Uber Supplier and confirm session is live."""
     try:
         Log.info("Pre-flight: Verifying session is active on Uber Supplier Portal...")
-        page.goto("https://supplier.uber.com", timeout=20000, wait_until="domcontentloaded")
-        time.sleep(4)
-        if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
-            Log.ok(f"✅ Session pre-flight passed. Active on: {page.url}")
+        page.goto("https://supplier.uber.com", timeout=30000, wait_until="domcontentloaded")
+        time.sleep(5)
+        dismiss_banner(page)
+        
+        if is_login_required(page):
+            Log.warn(f"❌ Session pre-flight: Login required (URL: {page.url})")
+            return False
+
+        user_menu = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
+        if user_menu.is_visible(timeout=5000):
+            Log.ok(f"✅ Session pre-flight passed (user menu active on: {page.url})")
             return True
-        Log.warn(f"❌ Session pre-flight failed — redirected to: {page.url}")
+
+        if "supplier.uber.com" in page.url and not is_login_required(page):
+            Log.ok(f"✅ Session pre-flight passed. Landed on: {page.url}")
+            return True
+
+        Log.warn(f"❌ Session pre-flight failed — unknown state on: {page.url}")
         return False
     except Exception as e:
         Log.warn(f"Session pre-flight note: {e}")
@@ -360,29 +407,50 @@ def login_with_google(page: Page, context: BrowserContext) -> bool:
 
 
 def ensure_login(page: Page, context: BrowserContext) -> bool:
-    time.sleep(3)
-    if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+    time.sleep(2)
+    dismiss_banner(page)
+
+    if "supplier.uber.com" in page.url and "/orgs/" in page.url and not is_login_required(page):
         Log.ok(f"Active session confirmed on {page.url}")
         save_session_state(context)
         return True
 
     Log.step("AUTH", "Automated Uber Login Engine (Password / SMS OTP / Google OAuth)...")
+
+    # If not on auth/login page, navigate to supplier login entrypoint
+    if not is_login_required(page):
+        try:
+            page.goto("https://supplier.uber.com/login", timeout=30000, wait_until="domcontentloaded")
+            time.sleep(4)
+            dismiss_banner(page)
+        except Exception:
+            pass
+
     init_code, init_date, _ = get_current_sheet_state()
+
+    # 1. Check for 'Log in' or 'Sign in' buttons on landing page
+    try:
+        landing_login = page.locator('a:has-text("Log in"), button:has-text("Log in"), a:has-text("Sign in"), button:has-text("Sign in")').first
+        if landing_login.is_visible(timeout=3000):
+            landing_login.click()
+            time.sleep(4)
+    except Exception:
+        pass
 
     # Strategy 1: Standard Uber Email + Password / SMS OTP
     try:
-        email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS').first
-        if email_input.is_visible(timeout=4000):
+        email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"]').first
+        if email_input.is_visible(timeout=5000):
             Log.info(f"Entering login email: {UBER_EMAIL}")
             email_input.fill("")
             email_input.type(UBER_EMAIL, delay=30)
             time.sleep(0.5)
-            continue_btn = page.locator('button:has-text("Continue"), button[type="submit"]').first
+            continue_btn = page.locator('button:has-text("Continue"), button[type="submit"], button#forward-button').first
             if continue_btn.is_visible():
                 continue_btn.click()
             else:
                 page.keyboard.press("Enter")
-            time.sleep(4)
+            time.sleep(5)
 
         # Password or More Options
         pwd_inputs = page.locator('input[type="password"]')
@@ -391,7 +459,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
             pwd_inputs.first.fill("")
             pwd_inputs.first.type(UBER_PASSWORD, delay=30)
             time.sleep(0.5)
-            submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+            submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"], button#forward-button').first
             if submit_btn.is_visible():
                 submit_btn.click()
             else:
@@ -424,7 +492,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
                         pwd_input.fill("")
                         pwd_input.type(UBER_PASSWORD, delay=30)
                         time.sleep(0.5)
-                        submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]').first
+                        submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"], button#forward-button').first
                         if submit_btn.is_visible():
                             submit_btn.click()
                         else:
@@ -438,7 +506,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
 
         # Check if logged in
         for _ in range(8):
-            if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+            if "supplier.uber.com" in page.url and not is_login_required(page):
                 Log.ok(f"🎉 Successfully logged in via standard auth! Landed on: {page.url}")
                 save_session_state(context)
                 return True
@@ -447,12 +515,12 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         Log.warn(f"Standard auth note: {e}")
 
     # Strategy 2: Fallback to Google Account OAuth
-    if "auth.uber.com" in page.url or "accounts.google.com" in page.url:
+    if is_login_required(page) or "accounts.google.com" in page.url:
         Log.warn("Standard login not confirmed. Initiating Google Account OAuth fallback...")
         if login_with_google(page, context):
             return True
 
-    return "supplier.uber.com" in page.url and "auth.uber.com" not in page.url
+    return "supplier.uber.com" in page.url and not is_login_required(page)
 
 
 def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previous_orgs: set) -> Page:
@@ -477,16 +545,16 @@ def switch_to_city(context: BrowserContext, main_page: Page, target: dict, previ
             dismiss_banner(main_page)
 
             # Check if redirected to auth
-            if "auth.uber.com" in main_page.url:
-                Log.warn(f"Redirected to auth.uber.com! Triggering automated login...")
+            if is_login_required(main_page):
+                Log.warn(f"Login required (detected URL: {main_page.url})! Triggering automated login...")
                 if ensure_login(main_page, context):
                     main_page.goto(url, timeout=45000, wait_until="domcontentloaded")
                     time.sleep(4)
                     dismiss_banner(main_page)
 
-            if f"/orgs/{org_uuid}" in main_page.url:
+            if f"/orgs/{org_uuid}" in main_page.url or not is_login_required(main_page):
                 exp_btn = main_page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
-                if exp_btn.is_visible(timeout=5000):
+                if exp_btn.is_visible(timeout=8000):
                     Log.ok(f"Direct URL verified for {city} via Org UUID ({org_uuid})!")
                     return main_page
         except Exception as e:
