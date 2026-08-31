@@ -287,7 +287,26 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
     return None
 
 
-def run():
+def refresh_page_before_export(main_page: Page, city: str, refreshes: int = 3):
+    """Refresh the promotions page 2-3 times before clicking Export to ensure clean state."""
+    print(f"\n[*] Refreshing page {refreshes}x before Export for {city} (clearing any stale state)...")
+    for i in range(1, refreshes + 1):
+        try:
+            main_page.reload(wait_until="domcontentloaded", timeout=30000)
+            print(f"   Refresh {i}/{refreshes} complete")
+            time.sleep(3)
+        except Exception as e:
+            print(f"   Refresh {i} note: {e}")
+
+
+def cooldown_after_download(city: str, seconds: int = 30):
+    """Wait after a download to let popup tabs fully close and network settle."""
+    print(f"\n[*] Cooldown: waiting {seconds}s after {city} download before next city...")
+    for i in range(seconds, 0, -5):
+        print(f"   Cooldown: {i}s remaining...", flush=True)
+        time.sleep(5)
+    print(f"[+] Cooldown complete. Proceeding to next city.\n")
+
     print("===========================================================================")
     print("   LETZRYD - LOCAL VISUAL RUNNER (PRODUCTION v4.8)")
     print("===========================================================================")
@@ -340,9 +359,13 @@ def run():
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
 
-        for target in TARGET_CITIES:
+        for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city_visual(context, main_page, target)
             time.sleep(2)
+            # Refresh page 3x before clicking Export to clear any stale state / leftover popup artefacts
+            refresh_page_before_export(main_page, target["city"], refreshes=3)
+            # Reset download state so we don't accidentally pick up the previous city's late event
+            download_state["latest_file"] = None
             csv_path = export_and_download_visual(context, main_page, target, download_state)
             if csv_path and csv_path.exists():
                 try:
@@ -351,6 +374,9 @@ def run():
                     all_city_dfs.append(df)
                 except Exception:
                     pass
+            # 30s cooldown between cities so popup tabs fully close and network settles
+            if i < len(TARGET_CITIES) - 1:
+                cooldown_after_download(target["city"], seconds=30)
 
         if all_city_dfs:
             master_df = pd.concat(all_city_dfs, ignore_index=True)

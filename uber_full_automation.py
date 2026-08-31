@@ -428,9 +428,20 @@ def main():
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
 
-        for target in TARGET_CITIES:
+        for i, target in enumerate(TARGET_CITIES):
             main_page = switch_to_city(context, main_page, target)
             time.sleep(2)
+            # Refresh page 3x before clicking Export to clear stale state / leftover popup artefacts
+            Log.info(f"Refreshing page 3x before Export for {target['city']}...")
+            for r in range(1, 4):
+                try:
+                    main_page.reload(wait_until="domcontentloaded", timeout=30000)
+                    Log.info(f"  Refresh {r}/3 complete")
+                    time.sleep(3)
+                except Exception as e:
+                    Log.warn(f"  Refresh {r} note: {e}")
+            # Reset download state so previous city's late event is not picked up
+            download_state["latest_file"] = None
             csv_path = export_and_download_city(context, main_page, target, download_state)
             if csv_path and csv_path.exists():
                 try:
@@ -439,6 +450,12 @@ def main():
                     all_city_dfs.append(df)
                 except Exception:
                     pass
+            # 30s cooldown between cities so popup tabs fully close and network settles
+            if i < len(TARGET_CITIES) - 1:
+                Log.info(f"Cooldown: 30s after {target['city']} download before proceeding...")
+                for s in range(30, 0, -5):
+                    Log.info(f"  Cooldown: {s}s remaining...")
+                    time.sleep(5)
 
         if all_city_dfs:
             master_df = pd.concat(all_city_dfs, ignore_index=True)
