@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and secrets
+.env
+*.env
+cookies.json
+storage_state.json
+
+# Chrome user profiles
+uber_chrome_profile/
+real_chrome_user_data/
+temp_chrome_profile/
+
+# Temporary directories and artifacts
+screenshots/
+uber_reports/
+downloads/
+
+# IDE / System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
