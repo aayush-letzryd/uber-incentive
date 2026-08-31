@@ -264,9 +264,9 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             if not number_plate or not start_date or not end_date:
                 continue
 
-            # Deduplicate by constraint key to prevent Postgres "ON CONFLICT DO UPDATE cannot affect row a second time" error
+            # Deduplicate by constraint key: prefer the record with higher payout / higher trips completed
             key = (city, number_plate, start_date, end_date, trip_target)
-            rows_dict[key] = (
+            row_tuple = (
                 city,
                 vehicle_name,
                 number_plate,
@@ -281,6 +281,14 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
                 driver_trip_breakdown,
                 now_ts
             )
+
+            if key in rows_dict:
+                existing_payout = rows_dict[key][9]
+                existing_trips = rows_dict[key][7]
+                if total_payout > existing_payout or (total_payout == existing_payout and trips_completed > existing_trips):
+                    rows_dict[key] = row_tuple
+            else:
+                rows_dict[key] = row_tuple
 
         rows_to_insert = list(rows_dict.values())
         print(f"[*] Prepared {len(rows_to_insert):,} unique deduplicated records for PostgreSQL (filtered {len(df) - len(rows_to_insert)} duplicates from Uber CSV).")
