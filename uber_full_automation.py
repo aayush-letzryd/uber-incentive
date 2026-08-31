@@ -1,11 +1,10 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.4)
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.5)
 ====================================================================
-Clicks 'Export' button on Promotions tab -> Waits for Uber backend generation ->
-Captures native CSV download into Downloads / uber_reports -> Builds Master Report.
-Covers Bangalore (BLR P), Mumbai (MUM P), and Hyderabad (HYD P).
-Cross-platform compatible (Windows + Linux Docker / GCP Cloud Run).
-Includes Stealth mode, realistic User-Agent, and multi-level Account Switcher.
+1. Uses context.on("download") to capture popup downloads
+2. Validates CSV headers on disk (catches .crdownload immediately)
+3. Switches across Bangalore, Mumbai, and Hyderabad
+4. Generates Excel & Master Report across all 3 cities
 """
 
 import sys, io
@@ -35,7 +34,7 @@ TARGET_CITIES = [
         "account_name": "SAMVREEDDHI MOBILITY Pvt. Ltd. BLR P",
         "short_name": "BLR P",
         "file_keyword": "BLR_P",
-        "max_wait_seconds": 1200  # 20 mins for large 20,847+ row fleet
+        "max_wait_seconds": 900
     },
     {
         "city": "Mumbai",
@@ -44,7 +43,7 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt. Ltd. MUM P",
         "short_name": "MUM P",
         "file_keyword": "MUM_P",
-        "max_wait_seconds": 900  # 15 mins
+        "max_wait_seconds": 600
     },
     {
         "city": "Hyderabad",
@@ -53,7 +52,7 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
         "file_keyword": "HYD_P",
-        "max_wait_seconds": 900  # 15 mins
+        "max_wait_seconds": 600
     }
 ]
 
@@ -135,6 +134,17 @@ def dismiss_banner(page: Page):
         pass
 
 
+def is_valid_incentive_file(file_path: Path) -> bool:
+    try:
+        if not file_path.exists() or file_path.stat().st_size < 100:
+            return False
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            header = f.readline()
+            return "Vehicle name" in header and "Number plate" in header
+    except Exception:
+        return False
+
+
 def switch_to_city(page: Page, target: dict) -> bool:
     city = target["city"]
     short = target["short_name"]
@@ -142,7 +152,6 @@ def switch_to_city(page: Page, target: dict) -> bool:
     org_uuid = target.get("org_uuid")
     Log.step("SWITCH", f"Opening {city} ('{short}')")
 
-    # Strategy 1: Direct URL Navigation if org_uuid is known
     if org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
         Log.info(f"Navigating to {city} URL: {url}...")
@@ -151,7 +160,6 @@ def switch_to_city(page: Page, target: dict) -> bool:
             Log.wait(4, f"Loading {city} promotions page")
             dismiss_banner(page)
 
-            # Check if Export button is present on direct navigation
             exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
             if exp_btn.is_visible(timeout=5000):
                 Log.ok(f"Direct URL verified for {city}!")
@@ -159,7 +167,7 @@ def switch_to_city(page: Page, target: dict) -> bool:
         except Exception as e:
             Log.warn(f"Direct navigation note: {e}")
 
-    # Strategy 2: Multi-Level Account Switcher UI
+    # Fallback to UI switcher
     Log.info(f"Using Account Switcher UI for {city}...")
     try:
         user_btn = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
@@ -172,7 +180,6 @@ def switch_to_city(page: Page, target: dict) -> bool:
                 sw_btn.click()
                 Log.wait(2, "Opening account list")
 
-                # 1. Expand City Accordion
                 for query in [acct, short, city]:
                     group = page.locator(f'div:has-text("{query}"), li:has-text("{query}"), span:has-text("{query}")').first
                     if group.is_visible(timeout=1500):
@@ -180,7 +187,6 @@ def switch_to_city(page: Page, target: dict) -> bool:
                         time.sleep(1)
                         break
 
-                # 2. Select specific sub-account entry
                 for query in [acct, short]:
                     opt = page.locator(f'text="{query}"').last
                     if opt.is_visible(timeout=1500):
@@ -190,15 +196,11 @@ def switch_to_city(page: Page, target: dict) -> bool:
                         Log.wait(4, f"Loading {city} dashboard")
                         break
 
-        # Ensure we are on Promotions tab
         if "/promotions" not in page.url:
             promo_tab = page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
             if promo_tab.is_visible(timeout=3000):
                 promo_tab.click()
                 Log.wait(3, "Opening Promotions tab")
-            elif org_uuid:
-                page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions", timeout=30000)
-                Log.wait(3, "Navigating to promotions")
 
         dismiss_banner(page)
         return True
@@ -208,7 +210,7 @@ def switch_to_city(page: Page, target: dict) -> bool:
         return False
 
 
-def export_and_download_city(page: Page, context: BrowserContext, target: dict) -> Path:
+def export_and_download_city(page: Page, context: BrowserContext, target: dict, download_state: dict) -> Path:
     city = target["city"]
     code = target["code"]
     kw   = target["file_keyword"]
@@ -218,7 +220,6 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
 
     dismiss_banner(page)
 
-    # Wait up to 15s for the export button to hydrate in SPA
     exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
     try:
         exp_btn.wait_for(state="visible", timeout=15000)
@@ -229,23 +230,9 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
         ss_path = SS_DIR / f"missing_export_{code.lower()}.png"
         page.screenshot(path=str(ss_path))
         Log.err(f"Export button not visible on {city} Promotions page! (URL: {page.url})")
-        Log.warn(f"Saved diagnostic screenshot: {ss_path.name}")
         return None
 
-    download_info = {"file": None}
-
-    def on_download(download):
-        Log.ok(f"📥 Download event received: {download.suggested_filename}")
-        dest = OUT_DIR / download.suggested_filename
-        try:
-            download.save_as(str(dest))
-            download_info["file"] = dest
-            Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-        except Exception as e:
-            Log.warn(f"Download save_as note: {e}")
-
-    page.on("download", on_download)
-
+    download_state["latest_file"] = None
     trigger_time = time.time()
     Log.info(f"Clicking 'Export' button for {city}...")
     try:
@@ -261,22 +248,23 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        if download_info["file"] and download_info["file"].exists() and download_info["file"].stat().st_size > 100:
-            found_file = download_info["file"]
+        # Check download event
+        if download_state.get("latest_file") and download_state["latest_file"].exists():
+            found_file = download_state["latest_file"]
             break
 
         # Scan OUT_DIR and USER_DL_DIR
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
-                for f in search_dir.glob("*.csv"):
-                    if "vehicle_incentives" in f.name.lower() and kw.lower() in f.name.lower():
+                for f in search_dir.glob("*"):
+                    if f.is_file() and (f.suffix in [".csv", ".crdownload"] or "vehicle_incentives" in f.name.lower()):
                         try:
                             if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
-                                dest = OUT_DIR / f.name
-                                if f != dest:
+                                if is_valid_incentive_file(f):
+                                    dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
                                     shutil.copy2(str(f), str(dest))
-                                found_file = dest
-                                break
+                                    found_file = dest
+                                    break
                         except Exception:
                             pass
             if found_file:
@@ -285,17 +273,12 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
         if found_file:
             break
 
-        if elapsed % 30 == 0 and elapsed > 0:
+        if elapsed % 15 == 0 and elapsed > 0:
             mins = elapsed // 60
             secs = elapsed % 60
             Log.info(f"Still waiting on Uber backend export... ({mins}m {secs}s / {max_wait//60}m)")
 
-        time.sleep(3)
-
-    try:
-        page.remove_listener("download", on_download)
-    except Exception:
-        pass
+        time.sleep(2)
 
     if found_file and found_file.exists():
         dest_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
@@ -362,6 +345,7 @@ def main():
 
     cleanup_locks()
     headless, channel, args = get_browser_launch_config()
+    download_state = {"latest_file": None}
 
     with sync_playwright() as pw:
         Log.info(f"Launching Browser (Headless: {headless}, Channel: {channel or 'bundled-chromium'})...")
@@ -380,9 +364,21 @@ def main():
             launch_kwargs["channel"] = channel
 
         context = pw.chromium.launch_persistent_context(**launch_kwargs)
+
+        def on_context_download(download):
+            Log.ok(f"📥 Context Download Event: {download.suggested_filename}")
+            dest = OUT_DIR / download.suggested_filename
+            try:
+                download.save_as(str(dest))
+                download_state["latest_file"] = dest
+                Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
+            except Exception as e:
+                Log.warn(f"Download save_as note: {e}")
+
+        context.on("download", on_context_download)
+
         page = context.pages[0] if context.pages else context.new_page()
         
-        # Apply Stealth mode
         try:
             Stealth().apply_stealth_sync(page)
             Log.ok("Stealth mode active")
@@ -394,10 +390,9 @@ def main():
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
 
-        # Process each city in sequence
         for target in TARGET_CITIES:
             switch_to_city(page, target)
-            csv_path = export_and_download_city(page, context, target)
+            csv_path = export_and_download_city(page, context, target, download_state)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
@@ -406,7 +401,6 @@ def main():
                 except Exception:
                     pass
 
-        # Build Master 3-City Consolidated Report
         if all_city_dfs:
             master_df = pd.concat(all_city_dfs, ignore_index=True)
             master_xlsx = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx"

@@ -1,11 +1,9 @@
 """
-LETZRYD · LOCAL VISUAL RUNNER (HEADED CHROME MODE)
-===================================================
-Opens visible Chrome on your screen so you can watch every step live:
-1. Loads authenticated session
-2. Switches between Bangalore, Mumbai, and Hyderabad
-3. Highlights elements on screen
-4. Clicks 'Export' and watches download progress
+LETZRYD · LOCAL VISUAL RUNNER (HEADED CHROME MODE v2.0)
+======================================================
+1. Uses context.on("download") to capture popup tab downloads instantly
+2. Scans for both .csv and .crdownload containing 'Vehicle name,Number plate'
+3. Converts to .xlsx and builds Master 3-City Dataset
 """
 
 import sys, io
@@ -38,7 +36,7 @@ TARGET_CITIES = [
         "account_name": "SAMVREEDDHI MOBILITY Pvt. Ltd. BLR P",
         "short_name": "BLR P",
         "file_keyword": "BLR_P",
-        "max_wait_seconds": 1200
+        "max_wait_seconds": 900
     },
     {
         "city": "Mumbai",
@@ -47,7 +45,7 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt. Ltd. MUM P",
         "short_name": "MUM P",
         "file_keyword": "MUM_P",
-        "max_wait_seconds": 900
+        "max_wait_seconds": 600
     },
     {
         "city": "Hyderabad",
@@ -56,13 +54,12 @@ TARGET_CITIES = [
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
         "file_keyword": "HYD_P",
-        "max_wait_seconds": 900
+        "max_wait_seconds": 600
     }
 ]
 
 
 def highlight(page: Page, locator):
-    """Visually highlights an element on screen with a bright red border."""
     try:
         locator.evaluate("el => el.style.border = '3px solid #ff0000'")
         time.sleep(0.5)
@@ -80,6 +77,18 @@ def dismiss_banner(page: Page):
         pass
 
 
+def is_valid_incentive_file(file_path: Path) -> bool:
+    """Checks if a file is a valid Uber incentive CSV by inspecting first line."""
+    try:
+        if not file_path.exists() or file_path.stat().st_size < 100:
+            return False
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            header = f.readline()
+            return "Vehicle name" in header and "Number plate" in header
+    except Exception:
+        return False
+
+
 def switch_to_city_visual(page: Page, target: dict):
     city = target["city"]
     short = target["short_name"]
@@ -94,59 +103,66 @@ def switch_to_city_visual(page: Page, target: dict):
     if org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
         print(f"[*] Navigating to {city} URL: {url}")
-        page.goto(url, timeout=45000)
-        time.sleep(4)
-        dismiss_banner(page)
+        try:
+            page.goto(url, timeout=45000)
+            time.sleep(4)
+            dismiss_banner(page)
 
-        exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
-        if exp_btn.is_visible(timeout=4000):
-            highlight(page, exp_btn)
-            print(f"✅ Landed directly on {city} Promotions page!")
-            return True
+            exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
+            if exp_btn.is_visible(timeout=4000):
+                highlight(page, exp_btn)
+                print(f"✅ Landed directly on {city} Promotions page!")
+                return True
+        except Exception as e:
+            print(f"[*] Note on direct navigation: {e}")
 
     # Switcher UI if needed
     print(f"[*] Opening Account Switcher menu for {city}...")
-    user_btn = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
-    if user_btn.is_visible(timeout=3000):
-        highlight(page, user_btn)
-        user_btn.click()
-        time.sleep(1)
+    try:
+        user_btn = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
+        if user_btn.is_visible(timeout=3000):
+            highlight(page, user_btn)
+            user_btn.click()
+            time.sleep(1)
 
-        sw_btn = page.locator('text="Switch account"').first
-        if sw_btn.is_visible(timeout=3000):
-            highlight(page, sw_btn)
-            sw_btn.click()
-            time.sleep(2)
+            sw_btn = page.locator('text="Switch account"').first
+            if sw_btn.is_visible(timeout=3000):
+                highlight(page, sw_btn)
+                sw_btn.click()
+                time.sleep(2)
 
-            for query in [acct, short, city]:
-                opt = page.locator(f'text="{query}"').first
-                if opt.is_visible(timeout=1500):
-                    highlight(page, opt)
-                    opt.click()
-                    time.sleep(1)
-                    break
+                for query in [acct, short, city]:
+                    opt = page.locator(f'text="{query}"').first
+                    if opt.is_visible(timeout=1500):
+                        highlight(page, opt)
+                        opt.click()
+                        time.sleep(1)
+                        break
 
-            for query in [acct, short]:
-                opt = page.locator(f'text="{query}"').last
-                if opt.is_visible(timeout=1500):
-                    highlight(page, opt)
-                    opt.click()
-                    print(f"✅ Selected {city} ({query}) from UI switcher!")
-                    time.sleep(4)
-                    break
+                for query in [acct, short]:
+                    opt = page.locator(f'text="{query}"').last
+                    if opt.is_visible(timeout=1500):
+                        highlight(page, opt)
+                        opt.click()
+                        print(f"✅ Selected {city} ({query}) from UI switcher!")
+                        time.sleep(4)
+                        break
 
-    if "/promotions" not in page.url:
-        promo_tab = page.locator('a:has-text("Promotions")').first
-        if promo_tab.is_visible(timeout=3000):
-            highlight(page, promo_tab)
-            promo_tab.click()
-            time.sleep(4)
+        if "/promotions" not in page.url:
+            promo_tab = page.locator('a:has-text("Promotions")').first
+            if promo_tab.is_visible(timeout=3000):
+                highlight(page, promo_tab)
+                promo_tab.click()
+                time.sleep(4)
 
-    dismiss_banner(page)
-    return True
+        dismiss_banner(page)
+        return True
+    except Exception as e:
+        print(f"[*] Note on switcher: {e}")
+        return False
 
 
-def export_and_download_visual(page: Page, context: BrowserContext, target: dict) -> Path:
+def export_and_download_visual(page: Page, context: BrowserContext, target: dict, download_state: dict) -> Path:
     city = target["city"]
     code = target["code"]
     kw   = target["file_keyword"]
@@ -169,28 +185,17 @@ def export_and_download_visual(page: Page, context: BrowserContext, target: dict
     highlight(page, exp_btn)
     print(f"🎯 Found 'Export' button! Clicking now...")
 
-    download_info = {"file": None}
-
-    def on_download(download):
-        print(f"\n📥 [DOWNLOAD EVENT] Suggested filename: {download.suggested_filename}")
-        dest = OUT_DIR / download.suggested_filename
-        try:
-            download.save_as(str(dest))
-            download_info["file"] = dest
-            print(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-        except Exception as e:
-            print(f"[*] Save note: {e}")
-
-    page.on("download", on_download)
-
+    # Reset download state for this city
+    download_state["latest_file"] = None
     trigger_time = time.time()
+
     try:
         exp_btn.evaluate("b => b.click()")
     except Exception:
         exp_btn.click(force=True)
 
     print(f"🚀 Export request submitted to Uber backend! Waiting for file download...")
-    print(f"   (Uber backend takes ~3-12 minutes depending on fleet size. Watching live...)")
+    print(f"   (Watching for download completion on context and disk...)")
 
     start_time = time.time()
     found_file = None
@@ -198,22 +203,23 @@ def export_and_download_visual(page: Page, context: BrowserContext, target: dict
     while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        if download_info["file"] and download_info["file"].exists() and download_info["file"].stat().st_size > 100:
-            found_file = download_info["file"]
+        # 1. Check if context.on('download') captured it
+        if download_state.get("latest_file") and download_state["latest_file"].exists():
+            found_file = download_state["latest_file"]
             break
 
-        # Scan OUT_DIR and USER_DL_DIR
+        # 2. Scan OUT_DIR and USER_DL_DIR for newly modified CSV / crdownload files
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
-                for f in search_dir.glob("*.csv"):
-                    if "vehicle_incentives" in f.name.lower() and kw.lower() in f.name.lower():
+                for f in search_dir.glob("*"):
+                    if f.is_file() and (f.suffix in [".csv", ".crdownload"] or "vehicle_incentives" in f.name.lower()):
                         try:
                             if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
-                                dest = OUT_DIR / f.name
-                                if f != dest:
+                                if is_valid_incentive_file(f):
+                                    dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
                                     shutil.copy2(str(f), str(dest))
-                                found_file = dest
-                                break
+                                    found_file = dest
+                                    break
                         except Exception:
                             pass
             if found_file:
@@ -222,17 +228,12 @@ def export_and_download_visual(page: Page, context: BrowserContext, target: dict
         if found_file:
             break
 
-        if elapsed % 15 == 0 and elapsed > 0:
+        if elapsed % 10 == 0 and elapsed > 0:
             mins = elapsed // 60
             secs = elapsed % 60
             print(f"   ⏳ Waiting for Uber generation... ({mins}m {secs}s elapsed)", flush=True)
 
-        time.sleep(3)
-
-    try:
-        page.remove_listener("download", on_download)
-    except Exception:
-        pass
+        time.sleep(2)
 
     if found_file and found_file.exists():
         dest_csv  = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
@@ -263,6 +264,8 @@ def run():
             try: p.unlink()
             except Exception: pass
 
+    download_state = {"latest_file": None}
+
     with sync_playwright() as pw:
         print("[*] Launching Visible Chrome Browser on your screen...")
         context = pw.chromium.launch_persistent_context(
@@ -280,6 +283,19 @@ def run():
             ]
         )
 
+        # Context-level download handler captures popup downloads
+        def on_context_download(download):
+            print(f"\n📥 [CONTEXT DOWNLOAD EVENT] Suggested filename: {download.suggested_filename}")
+            dest = OUT_DIR / download.suggested_filename
+            try:
+                download.save_as(str(dest))
+                download_state["latest_file"] = dest
+                print(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
+            except Exception as e:
+                print(f"[*] Save note: {e}")
+
+        context.on("download", on_context_download)
+
         page = context.pages[0] if context.pages else context.new_page()
 
         if COOKIES_F.exists():
@@ -292,7 +308,7 @@ def run():
 
         for target in TARGET_CITIES:
             switch_to_city_visual(page, target)
-            csv_path = export_and_download_visual(page, context, target)
+            csv_path = export_and_download_visual(page, context, target, download_state)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
