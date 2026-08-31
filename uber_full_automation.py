@@ -887,16 +887,15 @@ def main():
 
         context = pw.chromium.launch_persistent_context(**launch_kwargs)
 
-        try:
             def on_context_download(download):
-                Log.ok(f"📥 Context Download Event: {download.suggested_filename}")
                 dest = OUT_DIR / download.suggested_filename
                 try:
                     download.save_as(str(dest))
                     download_state["latest_file"] = dest
+                    Log.ok(f"📥 Context Download Event: {download.suggested_filename}")
                     Log.ok(f"✅ Download saved: {dest.name} ({dest.stat().st_size:,} bytes)")
-                except Exception as e:
-                    Log.warn(f"Download save_as note: {e}")
+                except Exception:
+                    pass
 
             context.on("download", on_context_download)
             context.on("page", lambda p: p.on("download", on_context_download))
