@@ -1,10 +1,11 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.2)
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v4.4)
 ====================================================================
 Clicks 'Export' button on Promotions tab -> Waits for Uber backend generation ->
 Captures native CSV download into Downloads / uber_reports -> Builds Master Report.
 Covers Bangalore (BLR P), Mumbai (MUM P), and Hyderabad (HYD P).
 Cross-platform compatible (Windows + Linux Docker / GCP Cloud Run).
+Includes Stealth mode, realistic User-Agent, and multi-level Account Switcher.
 """
 
 import sys, io
@@ -21,6 +22,7 @@ import datetime
 import pandas as pd
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, BrowserContext
+from playwright_stealth import Stealth
 
 # ==============================================================================
 # CONFIGURATION
@@ -126,7 +128,7 @@ def load_session(context: BrowserContext) -> bool:
 def dismiss_banner(page: Page):
     try:
         banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"]').first
-        if banner_close.is_visible(timeout=1000):
+        if banner_close.is_visible(timeout=1500):
             banner_close.click()
             time.sleep(1)
     except Exception:
@@ -140,45 +142,70 @@ def switch_to_city(page: Page, target: dict) -> bool:
     org_uuid = target.get("org_uuid")
     Log.step("SWITCH", f"Opening {city} ('{short}')")
 
-    if city in ["Bangalore", "Mumbai"] and org_uuid:
+    # Strategy 1: Direct URL Navigation if org_uuid is known
+    if org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
         Log.info(f"Navigating to {city} URL: {url}...")
-        page.goto(url, timeout=45000)
-        Log.wait(5, f"Loading {city} promotions page")
+        try:
+            page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            Log.wait(4, f"Loading {city} promotions page")
+            dismiss_banner(page)
+
+            # Check if Export button is present on direct navigation
+            exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
+            if exp_btn.is_visible(timeout=5000):
+                Log.ok(f"Direct URL verified for {city}!")
+                return True
+        except Exception as e:
+            Log.warn(f"Direct navigation note: {e}")
+
+    # Strategy 2: Multi-Level Account Switcher UI
+    Log.info(f"Using Account Switcher UI for {city}...")
+    try:
+        user_btn = page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
+        if user_btn.is_visible(timeout=4000):
+            user_btn.click()
+            Log.wait(1, "Opening user menu")
+            
+            sw_btn = page.locator('text="Switch account"').first
+            if sw_btn.is_visible(timeout=3000):
+                sw_btn.click()
+                Log.wait(2, "Opening account list")
+
+                # 1. Expand City Accordion
+                for query in [acct, short, city]:
+                    group = page.locator(f'div:has-text("{query}"), li:has-text("{query}"), span:has-text("{query}")').first
+                    if group.is_visible(timeout=1500):
+                        group.click()
+                        time.sleep(1)
+                        break
+
+                # 2. Select specific sub-account entry
+                for query in [acct, short]:
+                    opt = page.locator(f'text="{query}"').last
+                    if opt.is_visible(timeout=1500):
+                        opt.scroll_into_view_if_needed()
+                        opt.click()
+                        Log.ok(f"Selected {city} ({query}) from switcher")
+                        Log.wait(4, f"Loading {city} dashboard")
+                        break
+
+        # Ensure we are on Promotions tab
+        if "/promotions" not in page.url:
+            promo_tab = page.locator('a:has-text("Promotions"), nav a[href*="promotions"]').first
+            if promo_tab.is_visible(timeout=3000):
+                promo_tab.click()
+                Log.wait(3, "Opening Promotions tab")
+            elif org_uuid:
+                page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions", timeout=30000)
+                Log.wait(3, "Navigating to promotions")
+
         dismiss_banner(page)
         return True
 
-    # Account switcher menu for sub-accounts
-    user_btn = page.locator('[data-testid="user-menu-button"]').first
-    if user_btn.is_visible(timeout=4000):
-        user_btn.click()
-        Log.wait(1, "Opening user menu")
-        sw_btn = page.locator('text="Switch account"').first
-        if sw_btn.is_visible(timeout=3000):
-            sw_btn.click()
-            Log.wait(2, "Opening account list")
-
-            for query in [short, acct, city]:
-                opt = page.locator(f'text="{query}"').last
-                if opt.is_visible(timeout=1500):
-                    opt.scroll_into_view_if_needed()
-                    opt.click()
-                    Log.ok(f"Selected {city} ({query})")
-                    Log.wait(5, f"Loading {city} dashboard")
-                    return True
-
-            for _ in range(6):
-                page.mouse.wheel(0, 350)
-                time.sleep(0.5)
-                opt = page.locator(f'text="{short}"').last
-                if opt.is_visible(timeout=1000):
-                    opt.click()
-                    Log.ok(f"Selected {city} after scroll")
-                    Log.wait(5, f"Loading {city} dashboard")
-                    return True
-
-            page.keyboard.press("Escape")
-    return False
+    except Exception as e:
+        Log.warn(f"Account switch note for {city}: {e}")
+        return False
 
 
 def export_and_download_city(page: Page, context: BrowserContext, target: dict) -> Path:
@@ -191,9 +218,18 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict) 
 
     dismiss_banner(page)
 
+    # Wait up to 15s for the export button to hydrate in SPA
     exp_btn = page.locator('[data-testid="promotions-export-button"], button:has-text("Export")').first
-    if not exp_btn.is_visible(timeout=5000):
-        Log.err(f"Export button not visible on {city} Promotions page!")
+    try:
+        exp_btn.wait_for(state="visible", timeout=15000)
+    except Exception:
+        pass
+
+    if not exp_btn.is_visible(timeout=2000):
+        ss_path = SS_DIR / f"missing_export_{code.lower()}.png"
+        page.screenshot(path=str(ss_path))
+        Log.err(f"Export button not visible on {city} Promotions page! (URL: {page.url})")
+        Log.warn(f"Saved diagnostic screenshot: {ss_path.name}")
         return None
 
     download_info = {"file": None}
@@ -334,6 +370,7 @@ def main():
             "user_data_dir": str(PROFILE_DIR),
             "headless": headless,
             "viewport": {"width": 1440, "height": 900},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "accept_downloads": True,
             "downloads_path": str(OUT_DIR),
             "ignore_default_args": ["--enable-automation"],
@@ -344,6 +381,14 @@ def main():
 
         context = pw.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else context.new_page()
+        
+        # Apply Stealth mode
+        try:
+            Stealth().apply_stealth_sync(page)
+            Log.ok("Stealth mode active")
+        except Exception as e:
+            Log.warn(f"Stealth apply note: {e}")
+
         load_session(context)
 
         all_city_dfs = []
