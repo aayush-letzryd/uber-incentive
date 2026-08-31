@@ -1,7 +1,9 @@
 """
-LETZRYD · UBER OFFICIAL EXPORT AUTOMATION ENGINE (PRODUCTION v3.0)
-Click Export -> Wait for backend generation & popup tab download (5-15 mins) -> Auto-save CSV.
-Supports Bangalore, Mumbai, and Hyderabad with Master 3-City Consolidation.
+LETZRYD · UBER OFFICIAL EXPORT & DOWNLOAD PIPELINE (PRODUCTION v3.1)
+====================================================================
+Clicks 'Export' button on Promotions tab -> Waits for Uber backend generation ->
+Captures native CSV download into Downloads / uber_reports -> Builds Master Report.
+Covers Bangalore (BLR P), Mumbai (MUM P), and Hyderabad (HYD P).
 """
 
 import sys, io
@@ -29,7 +31,8 @@ TARGET_CITIES = [
         "org_uuid": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
         "account_name": "SAMVREEDDHI MOBILITY Pvt. Ltd. BLR P",
         "short_name": "BLR P",
-        "file_keyword": "BLR_P"
+        "file_keyword": "BLR_P",
+        "max_wait_seconds": 900  # 15 mins for 20,847+ rows
     },
     {
         "city": "Mumbai",
@@ -37,15 +40,17 @@ TARGET_CITIES = [
         "org_uuid": "44cb587c-a690-44b5-94c2-37539500c7d5",
         "account_name": "Samvreeddhi Mobility Pvt. Ltd. MUM P",
         "short_name": "MUM P",
-        "file_keyword": "MUM_P"
+        "file_keyword": "MUM_P",
+        "max_wait_seconds": 600  # 10 mins
     },
     {
         "city": "Hyderabad",
         "code": "HYD",
-        "org_uuid": "ebb10afb-c08b-463e-a4fa-33b64674adfd", # org root or switcher
+        "org_uuid": "ebb10afb-c08b-463e-a4fa-33b64674adfd",
         "account_name": "Samvreeddhi Mobility Pvt Ltd HYD P",
         "short_name": "HYD P",
-        "file_keyword": "HYD_P"
+        "file_keyword": "HYD_P",
+        "max_wait_seconds": 600  # 10 mins
     }
 ]
 
@@ -118,7 +123,7 @@ def load_session(context: BrowserContext) -> bool:
 
 def dismiss_banner(page: Page):
     try:
-        banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"], svg[aria-label="Close"]').first
+        banner_close = page.locator('header svg[data-baseweb="icon"], button[aria-label="Close"]').first
         if banner_close.is_visible(timeout=1000):
             banner_close.click()
             time.sleep(1)
@@ -133,16 +138,15 @@ def switch_to_city(page: Page, target: dict) -> bool:
     org_uuid = target.get("org_uuid")
     Log.step("SWITCH", f"Opening {city} ('{short}')")
 
-    # If direct org UUID is available, navigate directly
-    if org_uuid:
+    if city in ["Bangalore", "Mumbai"] and org_uuid:
         url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
-        Log.info(f"Navigating directly to {city} URL: {url}...")
+        Log.info(f"Navigating to {city} URL: {url}...")
         page.goto(url, timeout=45000)
         Log.wait(5, f"Loading {city} promotions page")
         dismiss_banner(page)
         return True
 
-    # Fallback to UI switcher
+    # Account switcher menu for sub-accounts
     user_btn = page.locator('[data-testid="user-menu-button"]').first
     if user_btn.is_visible(timeout=4000):
         user_btn.click()
@@ -175,14 +179,11 @@ def switch_to_city(page: Page, target: dict) -> bool:
     return False
 
 
-def export_and_download_city(page: Page, context: BrowserContext, target: dict, max_wait_seconds: int = 720) -> Path:
-    """
-    Clicks Export, intercepts the popup download or file write on disk,
-    and returns the downloaded official CSV path.
-    """
+def export_and_download_city(page: Page, context: BrowserContext, target: dict) -> Path:
     city = target["city"]
     code = target["code"]
     kw   = target["file_keyword"]
+    max_wait = target.get("max_wait_seconds", 720)
     today = datetime.datetime.now().strftime("%Y%m%d")
     Log.step("EXPORT", f"Triggering Official Export & Download for {city} ({code})")
 
@@ -193,25 +194,7 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
         Log.err(f"Export button not visible on {city} Promotions page!")
         return None
 
-    # Track download
-    download_tracker = {"path": None, "filename": None}
-
-    def on_page(new_page):
-        Log.info(f"⚡ Ephemeral popup tab opened: {new_page.url[:60]}")
-        new_page.on("download", lambda dl: handle_dl(dl))
-
-    def handle_dl(dl):
-        Log.ok(f"🔥🔥 DOWNLOAD EVENT CAUGHT: {dl.suggested_filename} 🔥🔥")
-        dest = OUT_DIR / dl.suggested_filename
-        dl.save_as(str(dest))
-        download_tracker["path"] = dest
-        download_tracker["filename"] = dl.suggested_filename
-        Log.ok(f"Saved to: {dest} ({dest.stat().st_size:,} bytes)")
-
-    context.on("page", on_page)
-    page.on("download", handle_dl)
-
-    # Click the Export button
+    # Track download trigger timestamp
     trigger_time = time.time()
     Log.info(f"Clicking 'Export' button for {city}...")
     try:
@@ -219,32 +202,32 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
     except Exception:
         exp_btn.click(force=True)
 
-    Log.ok(f"Export triggered! Waiting up to {max_wait_seconds//60} mins for Uber to generate and download file...")
+    Log.ok(f"Export triggered! Monitoring download (up to {max_wait//60} mins)...")
 
     start_time = time.time()
     found_file = None
 
-    while time.time() - start_time < max_wait_seconds:
+    while time.time() - start_time < max_wait:
         elapsed = int(time.time() - start_time)
 
-        # 1. Check if download tracker caught it
-        if download_tracker["path"] and download_tracker["path"].exists() and download_tracker["path"].stat().st_size > 0:
-            found_file = download_tracker["path"]
-            break
-
-        # 2. Check if file appeared in Downloads or OUT_DIR
+        # Watch Downloads and OUT_DIR for the newly modified official CSV
         for search_dir in [USER_DL_DIR, OUT_DIR]:
             if search_dir.exists():
                 for f in search_dir.glob("*.csv"):
                     if "vehicle_incentives" in f.name.lower() and kw.lower() in f.name.lower():
                         try:
-                            if f.stat().st_mtime >= (trigger_time - 10) and f.stat().st_size > 0:
-                                Log.ok(f"🎯 Picked up newly downloaded file from disk: {f.name}")
-                                dest = OUT_DIR / f.name
-                                if f != dest:
-                                    shutil.copy2(str(f), str(dest))
-                                found_file = dest
-                                break
+                            # File must have been created/modified after export was clicked
+                            if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
+                                # Ensure file is not currently being written
+                                initial_size = f.stat().st_size
+                                time.sleep(2)
+                                if f.stat().st_size == initial_size:
+                                    Log.ok(f"🎯 Picked up downloaded CSV: {f.name} ({f.stat().st_size:,} bytes)")
+                                    dest = OUT_DIR / f.name
+                                    if f != dest:
+                                        shutil.copy2(str(f), str(dest))
+                                    found_file = dest
+                                    break
                         except Exception:
                             pass
             if found_file:
@@ -256,7 +239,7 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
         if elapsed % 30 == 0 and elapsed > 0:
             mins = elapsed // 60
             secs = elapsed % 60
-            Log.info(f"Still waiting on Uber backend generation... ({mins}m {secs}s / {max_wait_seconds//60}m)")
+            Log.info(f"Still waiting on Uber backend export... ({mins}m {secs}s / {max_wait//60}m)")
 
         time.sleep(3)
 
@@ -267,7 +250,6 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
         if found_file != dest_csv:
             shutil.copy2(str(found_file), str(dest_csv))
 
-        # Convert to Excel & parse records count
         try:
             df = pd.read_csv(dest_csv)
             df["City"] = city
@@ -278,7 +260,7 @@ def export_and_download_city(page: Page, context: BrowserContext, target: dict, 
             Log.warn(f"Excel conversion note: {e}")
             return dest_csv
 
-    Log.warn(f"Timed out after {max_wait_seconds}s waiting for {city} export.")
+    Log.warn(f"Timed out after {max_wait}s waiting for {city} export.")
     return None
 
 
@@ -294,7 +276,7 @@ def main():
     cleanup_locks()
 
     with sync_playwright() as pw:
-        Log.info("Launching Chrome with persistent profile...")
+        Log.info("Launching Chrome...")
         context = pw.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE_DIR),
             channel="chrome",
@@ -305,8 +287,7 @@ def main():
             ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--start-maximized"
+                "--disable-infobars"
             ]
         )
 
@@ -316,10 +297,10 @@ def main():
         all_city_dfs = []
         today = datetime.datetime.now().strftime("%Y%m%d")
 
-        # Iterate through Bangalore, Mumbai, Hyderabad
+        # Process each city in sequence
         for target in TARGET_CITIES:
             switch_to_city(page, target)
-            csv_path = export_and_download_city(page, context, target, max_wait_seconds=720) # 12 mins per city
+            csv_path = export_and_download_city(page, context, target)
             if csv_path and csv_path.exists():
                 try:
                     df = pd.read_csv(csv_path)
