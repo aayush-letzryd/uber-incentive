@@ -307,6 +307,8 @@ def cooldown_after_download(city: str, seconds: int = 30):
         time.sleep(5)
     print(f"[+] Cooldown complete. Proceeding to next city.\n")
 
+
+def run():
     print("===========================================================================")
     print("   LETZRYD - LOCAL VISUAL RUNNER (PRODUCTION v4.8)")
     print("===========================================================================")
