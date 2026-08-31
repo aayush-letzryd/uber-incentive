@@ -232,21 +232,26 @@ def export_and_download_visual(context: BrowserContext, main_page: Page, target:
                 found_file = download_state["latest_file"]
                 break
 
-        # 2. Scan OUT_DIR and USER_DL_DIR
+        # 2. Scan OUT_DIR and USER_DL_DIR — catch .csv AND UUID-named files (no extension)
         for search_dir in [OUT_DIR, USER_DL_DIR]:
             if search_dir.exists():
-                for f in search_dir.glob("*.csv"):
-                    if f.is_file() and not f.name.endswith(".crdownload"):
-                        try:
-                            if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
-                                if is_valid_incentive_file(f):
-                                    dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
-                                    if f != dest:
-                                        shutil.copy2(str(f), str(dest))
-                                    found_file = dest
-                                    break
-                        except Exception:
-                            pass
+                for f in search_dir.iterdir():
+                    if not f.is_file():
+                        continue
+                    # Skip partial downloads and temp files
+                    if f.suffix in [".crdownload", ".tmp", ".part"]:
+                        continue
+                    try:
+                        if f.stat().st_mtime >= (trigger_time - 5) and f.stat().st_size > 100:
+                            if is_valid_incentive_file(f):
+                                dest = OUT_DIR / f"{today}-vehicle_incentives-SAMVREEDDHI_{code}_P.csv"
+                                if f != dest:
+                                    shutil.copy2(str(f), str(dest))
+                                found_file = dest
+                                print(f"\n📥 Found downloaded file: {f.name} -> {dest.name}")
+                                break
+                    except Exception:
+                        pass
             if found_file:
                 break
 
