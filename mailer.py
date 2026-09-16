@@ -37,11 +37,12 @@ def send_success_email(
     mum_file_url: str = "#",
     hyd_file_url: str = "#",
     master_file_url: str = "#",
-    recipients: list[str] = None
+    recipients: list[str] = None,
+    org_breakdown: dict = None,
+    city_breakdown: dict = None
 ) -> bool:
     """
-    Sends LetzRyd branded Green Success Email with cloud bucket download links for all 3 cities & Master report.
-    No heavy attachments - all files downloadable via GCS links.
+    Sends LetzRyd branded Green Success Email with cloud bucket download links for all sub-orgs & Master report.
     """
     recipients = _normalize_recipients(recipients)
 
@@ -57,6 +58,23 @@ def send_success_email(
     mum_fmt   = f"{int(mum_rows or 0):,}"
     hyd_fmt   = f"{int(hyd_rows or 0):,}"
     total_fmt = f"{int(total_rows or 0):,}"
+
+    org_table_html = ""
+    if org_breakdown:
+        org_rows = ""
+        for org_n, count in sorted(org_breakdown.items(), key=lambda x: -x[1]):
+            org_rows += f"""
+            <tr style="border-bottom: 1px dashed #e2e8f0;">
+              <td style="padding: 6px 0; color: #475569; font-size: 12px;">{html.escape(str(org_n))}</td>
+              <td style="padding: 6px 0; color: #1e293b; font-weight: 700; font-size: 12px; text-align: right;">{count:,} records</td>
+            </tr>"""
+        org_table_html = f"""
+        <div class="downloads-card" style="margin-bottom: 20px;">
+          <div class="dl-title">🏢 Ingested Sub-Accounts ({len(org_breakdown)} Active Sub-Orgs)</div>
+          <table style="width: 100%; font-size: 12px; border-collapse: collapse;">
+            {org_rows}
+          </table>
+        </div>"""
 
     html_content = f"""<!DOCTYPE html>
 <html>
@@ -227,6 +245,8 @@ def send_success_email(
           </tr>
         </table>
       </div>
+
+      {org_table_html}
 
       <div class="downloads-card">
         <div class="dl-title">📂 Cloud Storage Statements (.xlsx)</div>

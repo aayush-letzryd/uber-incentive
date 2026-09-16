@@ -62,6 +62,7 @@ if not PG_HOST and HAS_PG:
 
 RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "vendor_aayush@letzryd.com").split(",") if r.strip()]
 
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 BASE_DIR = Path(__file__).parent
 OUT_DIR = BASE_DIR / "uber_reports"
 COOKIES_F = BASE_DIR / "cookies.json"
@@ -238,6 +239,31 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
     IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
     cur = None
     try:
+        cur = conn.cursor()
+        # Auto-ensure columns org_name, org_uuid and constraint exist
+        try:
+            cur.execute("""
+                ALTER TABLE uber_vehicle_incentives_raw ADD COLUMN IF NOT EXISTS org_name VARCHAR(150);
+                ALTER TABLE uber_vehicle_incentives_raw ADD COLUMN IF NOT EXISTS org_uuid VARCHAR(100);
+                ALTER TABLE uber_vehicle_incentives_raw DROP CONSTRAINT IF EXISTS uq_vehicle_incentive_window;
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'uq_vehicle_incentive_org_window'
+                    ) THEN
+                        ALTER TABLE uber_vehicle_incentives_raw
+                            ADD CONSTRAINT uq_vehicle_incentive_org_window
+                            UNIQUE (org_uuid, number_plate, start_date, end_date, trip_target);
+                    END IF;
+                END $$;
+                CREATE INDEX IF NOT EXISTS idx_uber_inc_org_uuid ON uber_vehicle_incentives_raw(org_uuid);
+                CREATE INDEX IF NOT EXISTS idx_uber_inc_org_name ON uber_vehicle_incentives_raw(org_name);
+            """)
+            conn.commit()
+        except Exception as mig_err:
+            print(f"[-] Note during auto-schema migration: {mig_err}")
+            conn.rollback()
+
         df = pd.read_excel(master_xlsx_path)
         print(f"[*] Ingesting {len(df):,} total rows from {master_xlsx_path.name} into PostgreSQL...")
 
@@ -248,7 +274,9 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
 
         for _, row in df.iterrows():
             city = str(row.get("city", "")).strip() or "Unknown"
-            vehicle_name = str(row.get("vehicle_name", "")).strip()
+            org_name = str(row.get("org_name", "")).strip() or "Unknown"
+            org_uuid = str(row.get("org_uuid", "")).strip() or "Unknown"
+            vehicle_name = str(row.get("vehicle_name", "")).strip() if pd.notna(row.get("vehicle_name")) else ""
             number_plate = str(row.get("number_plate", "")).strip()
             start_date = clean_timestamp(row.get("start_date"))
             end_date = clean_timestamp(row.get("end_date"))
@@ -264,10 +292,13 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             if not number_plate or not start_date or not end_date:
                 continue
 
-            # Deduplicate by constraint key: prefer the record with higher payout / higher trips completed
-            key = (city, number_plate, start_date, end_date, trip_target)
+            # Deduplicate by constraint key: (org_uuid, number_plate, start_date, end_date, trip_target)
+            # Prefer the record with higher payout / higher trips completed
+            key = (org_uuid, number_plate, start_date, end_date, trip_target)
             row_tuple = (
                 city,
+                org_name,
+                org_uuid,
                 vehicle_name,
                 number_plate,
                 start_date,
@@ -283,8 +314,8 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             )
 
             if key in rows_dict:
-                existing_payout = rows_dict[key][9]
-                existing_trips = rows_dict[key][7]
+                existing_payout = rows_dict[key][11] # total_payout index
+                existing_trips = rows_dict[key][9]   # trips_completed index
                 if total_payout > existing_payout or (total_payout == existing_payout and trips_completed > existing_trips):
                     rows_dict[key] = row_tuple
             else:
@@ -300,6 +331,8 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
         upsert_sql = """
         INSERT INTO uber_vehicle_incentives_raw (
             city,
+            org_name,
+            org_uuid,
             vehicle_name,
             number_plate,
             start_date,
@@ -313,8 +346,10 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             driver_trip_count_breakdown,
             ingested_at
         ) VALUES %s
-        ON CONFLICT (city, number_plate, start_date, end_date, trip_target)
+        ON CONFLICT (org_uuid, number_plate, start_date, end_date, trip_target)
         DO UPDATE SET
+            city = EXCLUDED.city,
+            org_name = EXCLUDED.org_name,
             vehicle_name = EXCLUDED.vehicle_name,
             acceptance_rate = EXCLUDED.acceptance_rate,
             target_acceptance_rate = EXCLUDED.target_acceptance_rate,
@@ -325,7 +360,6 @@ def upsert_master_to_postgres(master_xlsx_path: Path) -> int:
             ingested_at = EXCLUDED.ingested_at;
         """
 
-        cur = conn.cursor()
         execute_values(cur, upsert_sql, rows_to_insert, page_size=2000)
         conn.commit()
 
@@ -446,7 +480,7 @@ def run_pipeline():
 
         # Check output directory strictly for today's generated master report
         master_files = [
-            f for f in OUT_DIR.glob(f"*{today_compact}*ALL_3_CITIES.xlsx")
+            f for f in OUT_DIR.glob(f"*{today_compact}*ALL*.xlsx")
             if f.stat().st_mtime >= (start_time - 60)
         ]
 
@@ -457,12 +491,17 @@ def run_pipeline():
         print(f"[+] Located generated Master Excel: {master_path.name}")
 
         master_df = pd.read_excel(master_path)
-        blr_rows = len(master_df[master_df["City"] == "Bangalore"])
-        mum_rows = len(master_df[master_df["City"] == "Mumbai"])
-        hyd_rows = len(master_df[master_df["City"] == "Hyderabad"])
         total_rows = len(master_df)
 
-        print(f"[*] City Breakdown: Bangalore={blr_rows:,}, Mumbai={mum_rows:,}, Hyderabad={hyd_rows:,} | Total={total_rows:,}")
+        city_breakdown = master_df["City"].value_counts().to_dict() if "City" in master_df.columns else {}
+        org_breakdown = master_df["org_name"].value_counts().to_dict() if "org_name" in master_df.columns else {}
+
+        blr_rows = city_breakdown.get("Bangalore", 0)
+        mum_rows = city_breakdown.get("Mumbai", 0)
+        hyd_rows = city_breakdown.get("Hyderabad", 0)
+
+        print(f"[*] City Breakdown: {city_breakdown} | Total={total_rows:,}")
+        print(f"[*] Sub-Org Breakdown ({len(org_breakdown)} Active Orgs): {org_breakdown}")
 
         if total_rows == 0:
             raise RuntimeError("Generated Master Excel is empty (0 rows).")
@@ -494,7 +533,10 @@ def run_pipeline():
         blr_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_BLR_P.xlsx", "#")
         mum_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_MUM_P.xlsx", "#")
         hyd_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_HYD_P.xlsx", "#")
-        master_url = gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx", "#")
+        master_url = (
+            gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_ALL_ORGS.xlsx")
+            or gcs_urls.get(f"{today_compact}-vehicle_incentives-SAMVREEDDHI_ALL_3_CITIES.xlsx", "#")
+        )
 
         duration_sec = time.time() - start_time
         mins, secs = divmod(int(duration_sec), 60)
@@ -505,7 +547,7 @@ def run_pipeline():
             today_str=today_str,
             attempt=current_attempt,
             status="SUCCESS",
-            start_dt=date_window_start,   # Fix #5: real date range from CSV
+            start_dt=date_window_start,
             end_dt=date_window_end,
             blr_rows=blr_rows,
             mum_rows=mum_rows,
@@ -530,7 +572,9 @@ def run_pipeline():
             mum_file_url=mum_url,
             hyd_file_url=hyd_url,
             master_file_url=master_url,
-            recipients=RECIPIENTS
+            recipients=RECIPIENTS,
+            org_breakdown=org_breakdown,
+            city_breakdown=city_breakdown
         )
 
         state["status"] = "SUCCESS"
