@@ -398,10 +398,11 @@ def save_cached_org_uuid(code: str, uuid: str):
 
 
 # ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
-UBER_EMAIL    = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
-UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")   # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
-SHEET_ID      = os.getenv("SHEET_ID") or "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4"
-SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+UBER_EMAIL     = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
+UBER_PASSWORD  = os.getenv("UBER_PASSWORD", "")   # Uber portal password — set via Secret Manager
+GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD", "Letzryd@12345")  # Google/Gmail password for OAuth fallback
+SHEET_ID       = os.getenv("SHEET_ID") or "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4"
+SHEET_CSV_URL  = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 
 
 def get_current_sheet_state():
@@ -437,10 +438,10 @@ def poll_for_new_otp(initial_date, initial_code, timeout_seconds=90):
                 # Non-Uber SMS — keep polling, but save as fallback
                 Log.info(f"New code {code} seen but not from Uber (msg: {msg[:60]}...). Continuing to wait...")
         time.sleep(1)  # Poll every 1 second — sheet only keeps 1 row, can't miss the window
-    # Last resort: return whatever code is in the sheet right now
-    code, d_str, msg, _ = get_current_sheet_state()
-    if code:
-        Log.warn(f"OTP timeout — using best available code from sheet: {code}")
+    # Last resort: only return if it's actually from Uber — never return false positives like year 2026
+    code, d_str, msg, is_uber = get_current_sheet_state()
+    if code and is_uber:
+        Log.warn(f"OTP timeout — using last-resort Uber code from sheet: {code}")
         return code
     return None
 
@@ -469,9 +470,14 @@ def handle_otp_input(page: Page, initial_sheet_date: str, initial_sheet_code: st
 
         time.sleep(1)
         next_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button[type="submit"]').first
-        if next_btn.is_visible():
-            next_btn.click()
-        else:
+        btn_clicked = False
+        try:
+            if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
+                next_btn.click()
+                btn_clicked = True
+        except Exception:
+            pass
+        if not btn_clicked:
             page.keyboard.press("Enter")
         time.sleep(5)
 
@@ -503,76 +509,130 @@ def login_with_google(page: Page, context: BrowserContext) -> bool:
     Log.step("GOOGLE_AUTH", "Attempting Login via Google Account OAuth...")
     init_code, init_date, _, _ = get_current_sheet_state()
     try:
-        google_btn = page.locator('button:has-text("Continue with Google"), button:has-text("Google"), [data-testid*="google"]').first
-        if google_btn.is_visible(timeout=5000):
-            Log.info("Clicking 'Continue with Google'...")
-            # Use JS click to bypass Uber's enforcement CAPTCHA iframe overlay
-            try:
-                page.evaluate("document.querySelector('[data-testid*=\"google\"], #google-login-btn').click()")
-            except Exception:
-                try:
-                    google_btn.click(force=True)
-                except Exception:
-                    google_btn.click()
-            time.sleep(4)
+        # Step 1: If we're on the SMS OTP screen, click "More options" → "Google"
+        # to reach the "Continue with Google" screen
+        more_opts = page.locator('button:has-text("More options"), a:has-text("More options")').first
+        if more_opts.is_visible(timeout=3000):
+            Log.info("On OTP screen — clicking 'More options' to reach Google login...")
+            more_opts.click()
+            time.sleep(2)
+            # Click "Google" in the options popup
+            google_option = page.locator('text="Google"').first
+            if google_option.is_visible(timeout=4000):
+                Log.info("Selecting 'Google' from More options...")
+                google_option.click()
+                time.sleep(3)
 
-        # 1. Google Email
-        g_email = page.locator('input[type="email"], input#identifierId').first
-        if g_email.is_visible(timeout=6000):
+        # Step 2: Now find the "Continue with Google" button
+        google_btn = page.locator('button:has-text("Continue with Google"), button:has-text("Google"), [data-testid*="google"]').first
+        if not google_btn.is_visible(timeout=8000):
+            Log.warn("Google button not visible even after More options — skipping OAuth")
+            return False
+
+        Log.info("Clicking 'Continue with Google' — waiting for popup window...")
+        # Google OAuth opens in a NEW POPUP WINDOW — intercept it
+        try:
+            with context.expect_page(timeout=12000) as popup_info:
+                try:
+                    page.evaluate("document.querySelector('[data-testid*=\"google\"], #google-login-btn').click()")
+                except Exception:
+                    google_btn.click(force=True)
+            gp = popup_info.value  # the Google login popup page
+            gp.wait_for_load_state("domcontentloaded", timeout=15000)
+            Log.ok(f"Google popup opened: {gp.url}")
+        except Exception as e:
+            Log.warn(f"Could not capture Google popup: {e}. Trying main page flow...")
+            gp = page  # fallback: interact on main page
+
+        time.sleep(3)
+
+        # 1. Google Email (in popup)
+        g_email = gp.locator('input[type="email"], input#identifierId').first
+        if g_email.is_visible(timeout=8000):
             Log.info(f"Entering Google email: {UBER_EMAIL}")
-            g_email.fill("")
-            g_email.type(UBER_EMAIL, delay=30)
+            try:
+                g_email.fill(UBER_EMAIL)
+            except Exception:
+                gp.keyboard.type(UBER_EMAIL, delay=30)
             time.sleep(0.5)
-            next_btn = page.locator('#identifierNext button, button:has-text("Next")').first
-            if next_btn.is_visible():
-                next_btn.click()
-            else:
-                page.keyboard.press("Enter")
+            next_btn = gp.locator('#identifierNext button, button:has-text("Next")').first
+            try:
+                if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
+                    next_btn.click()
+                else:
+                    gp.keyboard.press("Enter")
+            except Exception:
+                gp.keyboard.press("Enter")
             time.sleep(5)
 
-        # 2. Google Password
-        g_pwd = page.locator('input[type="password"], input[name="Passwd"]').first
+        # 2. Google Password — USE GMAIL_PASSWORD, not Uber portal password
+        g_pwd = gp.locator('input[type="password"], input[name="Passwd"]').first
         if g_pwd.is_visible(timeout=8000):
-            Log.info("Entering Google password...")
-            g_pwd.fill("")
-            g_pwd.type(UBER_PASSWORD, delay=30)
+            Log.info("Entering Google/Gmail password...")
+            try:
+                g_pwd.fill(GMAIL_PASSWORD)
+            except Exception:
+                gp.keyboard.type(GMAIL_PASSWORD, delay=30)
             time.sleep(0.5)
-            next_btn = page.locator('#passwordNext button, button:has-text("Next")').first
-            if next_btn.is_visible():
-                next_btn.click()
-            else:
-                page.keyboard.press("Enter")
+            next_btn = gp.locator('#passwordNext button, button:has-text("Next")').first
+            try:
+                if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
+                    next_btn.click()
+                else:
+                    gp.keyboard.press("Enter")
+            except Exception:
+                gp.keyboard.press("Enter")
             time.sleep(6)
 
-        # 3. Google 2FA / Gmail OTP Verification
-        if any(w in page.content().lower() for w in ["verification code", "2-step", "enter code", "get a verification"]):
+        # 3. Google 2FA / Phone OTP (sent to 9900092015)
+        try:
+            content = gp.content().lower()
+        except Exception:
+            content = ""
+        if any(w in content for w in ["verification code", "2-step", "enter code", "verify", "phone"]):
             Log.info("Google 2-Step Verification detected. Polling Google Sheet for OTP...")
             otp = poll_for_new_otp(init_date, init_code, timeout_seconds=90)
             if not otp:
                 otp, _, _, _ = get_current_sheet_state()
             if otp:
-                Log.ok(f"Entering Google OTP: {otp}")
-                otp_input = page.locator('input#idvPin, input[type="tel"], input[name="Pin"]').first
+                Log.ok(f"Entering Google 2FA OTP: {otp}")
+                otp_input = gp.locator('input#idvPin, input[type="tel"], input[name="Pin"], input[aria-label*="code"]').first
                 if otp_input.is_visible(timeout=4000):
                     otp_input.fill(otp)
                     time.sleep(0.5)
-                    next_btn = page.locator('#idvPreregisteredPhoneNext button, button:has-text("Next")').first
-                    if next_btn.is_visible():
-                        next_btn.click()
-                    else:
-                        page.keyboard.press("Enter")
+                    next_btn = gp.locator('#idvPreregisteredPhoneNext button, button:has-text("Next")').first
+                    try:
+                        if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
+                            next_btn.click()
+                        else:
+                            gp.keyboard.press("Enter")
+                    except Exception:
+                        gp.keyboard.press("Enter")
                     time.sleep(6)
 
-        # 4. Wait for redirect back to supplier.uber.com
-        for _ in range(15):
-            if "supplier.uber.com" in page.url and "accounts.google.com" not in page.url and "auth.uber.com" not in page.url:
-                Log.ok(f"🎉 Google OAuth Login successful! Landed on: {page.url}")
-                save_session_state(context)
-                return True
+        # 4. Wait for main page to land on supplier.uber.com after popup closes
+        Log.info("Waiting for supplier.uber.com after Google OAuth...")
+        for _ in range(20):
+            try:
+                if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
+                    Log.ok(f"🎉 Google OAuth Login successful! Landed on: {page.url}")
+                    save_session_state(context)
+                    return True
+            except Exception:
+                pass
+            # Also check if popup itself landed on supplier.uber.com
+            try:
+                if "supplier.uber.com" in gp.url:
+                    Log.ok(f"🎉 Google OAuth Login successful via popup! URL: {gp.url}")
+                    save_session_state(context)
+                    return True
+            except Exception:
+                pass
             time.sleep(2)
     except Exception as e:
         Log.warn(f"Google login flow note: {e}")
     return False
+
 
 
 def ensure_login(page: Page, context: BrowserContext) -> bool:
