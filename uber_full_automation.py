@@ -123,9 +123,9 @@ def ensure_main_page(context: BrowserContext, main_page: Page) -> Page:
     # main_page is gone — recover from remaining open pages
     pages = [p for p in context.pages if not p.is_closed()]
     if pages:
-        # Prefer a supplier.uber.com page
+        # Prefer a fleethub.uber.com or supplier.uber.com page
         for p in pages:
-            if "supplier.uber.com" in p.url:
+            if "fleethub.uber.com" in p.url or "supplier.uber.com" in p.url:
                 return p
         return pages[0]
 
@@ -178,8 +178,8 @@ def is_login_required(page: Page) -> bool:
             "auth.uber.com", "login.uber.com", "accounts.google.com",
         ]):
             return True
-        # supplier.uber.com/login (exact login path, not /orgs/xxx/settings-login)
-        if "supplier.uber.com/login" in url or "supplier.uber.com/sign-in" in url:
+        # fleethub.uber.com/login or supplier.uber.com/login
+        if any(lp in url for lp in ["fleethub.uber.com/login", "fleethub.uber.com/sign-in", "supplier.uber.com/login", "supplier.uber.com/sign-in"]):
             return True
         # Check for auth-specific UI elements (avoid false positives from OTP inputs on dashboard)
         # Only check for email/phone login forms, not general input[type=email]
@@ -198,8 +198,8 @@ def is_login_required(page: Page) -> bool:
 def verify_session_active(page: Page) -> bool:
     """Pre-flight check: navigate to Uber Supplier and confirm session is live."""
     try:
-        Log.info("Pre-flight: Verifying session is active on Uber Supplier Portal...")
-        page.goto("https://supplier.uber.com", timeout=30000, wait_until="domcontentloaded")
+        Log.info("Pre-flight: Verifying session is active on Uber Fleet Hub...")
+        page.goto("https://fleethub.uber.com", timeout=30000, wait_until="domcontentloaded")
         time.sleep(5)
         dismiss_banner(page)
         
@@ -212,7 +212,7 @@ def verify_session_active(page: Page) -> bool:
             Log.ok(f"✅ Session pre-flight passed (user menu active on: {page.url})")
             return True
 
-        if "supplier.uber.com" in page.url and not is_login_required(page):
+        if ("fleethub.uber.com" in page.url or "supplier.uber.com" in page.url) and not is_login_required(page):
             Log.ok(f"✅ Session pre-flight passed. Landed on: {page.url}")
             return True
 
@@ -280,7 +280,7 @@ def discover_available_orgs(main_page: Page) -> list:
         # Open User Menu
         user_btn = main_page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
         if not user_btn.is_visible(timeout=5000):
-            main_page.goto("https://supplier.uber.com/", timeout=45000, wait_until="domcontentloaded")
+            main_page.goto("https://fleethub.uber.com/", timeout=45000, wait_until="domcontentloaded")
             time.sleep(4)
             user_btn = main_page.locator('[data-testid="user-menu-button"], header img, header button:has(svg)').first
 
@@ -656,7 +656,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
     # Only navigate to login page if currently on an auth/login page or unknown page.
     if not is_login_required(page) and "supplier.uber.com" not in page.url and "fleethub.uber.com" not in page.url:
         try:
-            page.goto("https://supplier.uber.com/login", timeout=30000, wait_until="domcontentloaded")
+            page.goto("https://fleethub.uber.com/login", timeout=30000, wait_until="domcontentloaded")
             time.sleep(4)
             dismiss_banner(page)
         except Exception:
@@ -827,7 +827,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         if login_with_google(page, context):
             return True
 
-    return "supplier.uber.com" in page.url and not is_login_required(page)
+    return ("fleethub.uber.com" in page.url or "supplier.uber.com" in page.url) and not is_login_required(page)
 
 
 def switch_to_org(context: BrowserContext, main_page: Page, org: dict, previous_orgs: set = None) -> Page:
@@ -840,7 +840,7 @@ def switch_to_org(context: BrowserContext, main_page: Page, org: dict, previous_
 
     # 1. Direct URL navigation if org_uuid is known (fast & reliable)
     if org_uuid:
-        url = f"https://supplier.uber.com/orgs/{org_uuid}/promotions"
+        url = f"https://fleethub.uber.com/orgs/{org_uuid}/promotions"
         Log.info(f"Direct navigating to {name} URL: {url}...")
         try:
             main_page.goto(url, timeout=45000, wait_until="domcontentloaded")
@@ -929,7 +929,7 @@ def switch_to_org(context: BrowserContext, main_page: Page, org: dict, previous_
             time.sleep(2)
 
     # Fallback: direct goto promotions page
-    main_page.goto(f"https://supplier.uber.com/orgs/{org_uuid}/promotions", timeout=30000)
+    main_page.goto(f"https://fleethub.uber.com/orgs/{org_uuid}/promotions", timeout=30000)
     return main_page
 
 
@@ -1219,7 +1219,7 @@ def main():
                         if is_login_required(main_page):
                             Log.warn(f"Session dropped during {org_name} reload! Re-logging in...")
                             if ensure_login(main_page, context):
-                                main_page.goto(f"https://supplier.uber.com/orgs/{uuid}/promotions",
+                                main_page.goto(f"https://fleethub.uber.com/orgs/{uuid}/promotions",
                                                timeout=30000, wait_until="domcontentloaded")
                                 time.sleep(3)
                     except Exception as e:
