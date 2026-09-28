@@ -400,8 +400,8 @@ def save_cached_org_uuid(code: str, uuid: str):
 # ── Secrets: sourced from GCP Secret Manager via Cloud Run --set-secrets ──
 UBER_EMAIL    = os.getenv("UBER_EMAIL", "uber.india@letzryd.com")
 UBER_PASSWORD = os.getenv("UBER_PASSWORD", "")   # Set via: --set-secrets UBER_PASSWORD=UBER_PASSWORD:latest
-SHEET_ID      = os.getenv("SHEET_ID", "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4")
-SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0" if SHEET_ID else ""
+SHEET_ID      = os.getenv("SHEET_ID") or "1014Tpm7Gj5VAtSW1CaMTIiPn7TxmT-qzHCctW8PlY_4"
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 
 
 def get_current_sheet_state():
@@ -613,13 +613,33 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"]').first
         if email_input.is_visible(timeout=5000):
             Log.info(f"Entering login email: {UBER_EMAIL}")
+            email_input.click()
             email_input.fill("")
             email_input.type(UBER_EMAIL, delay=30)
-            time.sleep(0.5)
+            # Dispatch React input, change, and blur events so validation enables the Continue button
+            try:
+                page.evaluate("""(val) => {
+                    const el = document.querySelector('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"]');
+                    if (el) {
+                        el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new Event('blur', { bubbles: true }));
+                    }
+                }""", UBER_EMAIL)
+            except Exception:
+                pass
+            time.sleep(1)
+
             continue_btn = page.locator('button:has-text("Continue"), button[type="submit"], button#forward-button').first
-            if continue_btn.is_visible():
-                continue_btn.click()
-            else:
+            btn_clicked = False
+            try:
+                if continue_btn.is_visible() and continue_btn.is_enabled(timeout=2000):
+                    continue_btn.click()
+                    btn_clicked = True
+            except Exception:
+                pass
+            if not btn_clicked:
                 page.keyboard.press("Enter")
             time.sleep(5)
 
@@ -627,13 +647,30 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         pwd_inputs = page.locator('input[type="password"]')
         if pwd_inputs.count() > 0 and pwd_inputs.first.is_visible():
             Log.info("Entering password directly...")
+            pwd_inputs.first.click()
             pwd_inputs.first.fill("")
             pwd_inputs.first.type(UBER_PASSWORD, delay=30)
-            time.sleep(0.5)
+            try:
+                page.evaluate("""(val) => {
+                    const el = document.querySelector('input[type="password"]');
+                    if (el) {
+                        el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }""", UBER_PASSWORD)
+            except Exception:
+                pass
+            time.sleep(1)
             submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"], button#forward-button').first
-            if submit_btn.is_visible():
-                submit_btn.click()
-            else:
+            btn_clicked = False
+            try:
+                if submit_btn.is_visible() and submit_btn.is_enabled(timeout=2000):
+                    submit_btn.click()
+                    btn_clicked = True
+            except Exception:
+                pass
+            if not btn_clicked:
                 page.keyboard.press("Enter")
             time.sleep(5)
         else:
@@ -660,13 +697,30 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
                     pwd_input = page.locator('input[type="password"]').first
                     if pwd_input.is_visible(timeout=5000):
                         Log.info("Entering password...")
+                        pwd_input.click()
                         pwd_input.fill("")
                         pwd_input.type(UBER_PASSWORD, delay=30)
-                        time.sleep(0.5)
+                        try:
+                            page.evaluate("""(val) => {
+                                const el = document.querySelector('input[type="password"]');
+                                if (el) {
+                                    el.value = val;
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
+                            }""", UBER_PASSWORD)
+                        except Exception:
+                            pass
+                        time.sleep(1)
                         submit_btn = page.locator('button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"], button#forward-button').first
-                        if submit_btn.is_visible():
-                            submit_btn.click()
-                        else:
+                        btn_clicked = False
+                        try:
+                            if submit_btn.is_visible() and submit_btn.is_enabled(timeout=2000):
+                                submit_btn.click()
+                                btn_clicked = True
+                        except Exception:
+                            pass
+                        if not btn_clicked:
                             page.keyboard.press("Enter")
                         time.sleep(6)
 
