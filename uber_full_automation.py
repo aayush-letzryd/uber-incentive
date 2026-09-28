@@ -434,7 +434,7 @@ def poll_for_new_otp(initial_date, initial_code, timeout_seconds=90):
 
 def handle_otp_input(page: Page, initial_sheet_date: str, initial_sheet_code: str):
     Log.step("2FA", "2FA SMS OTP Verification Screen Detected")
-    otp = poll_for_new_otp(initial_sheet_date, initial_sheet_code, timeout_seconds=60)
+    otp = poll_for_new_otp(initial_sheet_date, initial_sheet_code, timeout_seconds=90)
     if not otp:
         otp, _, _ = get_current_sheet_state()
 
@@ -493,7 +493,14 @@ def login_with_google(page: Page, context: BrowserContext) -> bool:
         google_btn = page.locator('button:has-text("Continue with Google"), button:has-text("Google"), [data-testid*="google"]').first
         if google_btn.is_visible(timeout=5000):
             Log.info("Clicking 'Continue with Google'...")
-            google_btn.click()
+            # Use JS click to bypass Uber's enforcement CAPTCHA iframe overlay
+            try:
+                page.evaluate("document.querySelector('[data-testid*=\"google\"], #google-login-btn').click()")
+            except Exception:
+                try:
+                    google_btn.click(force=True)
+                except Exception:
+                    google_btn.click()
             time.sleep(4)
 
         # 1. Google Email
