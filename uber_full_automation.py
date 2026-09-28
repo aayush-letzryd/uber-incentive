@@ -412,7 +412,7 @@ def get_current_sheet_state():
             if not df.empty:
                 first_msg = str(df.iloc[0, 0])
                 first_date = str(df.iloc[0, 2]) if df.shape[1] >= 3 else ""
-                match = re.search(r'\b(\d{4})\b', first_msg)
+                match = re.search(r'\b(\d{4,6})\b', first_msg)
                 code = match.group(1) if match else None
                 return code, first_date, first_msg
     except Exception as e:
@@ -438,10 +438,10 @@ def handle_otp_input(page: Page, initial_sheet_date: str, initial_sheet_code: st
     if not otp:
         otp, _, _ = get_current_sheet_state()
 
-    if otp and len(otp) == 4:
-        Log.ok(f"Entering 4-digit OTP: {otp}")
+    if otp and (len(otp) == 4 or len(otp) == 6):
+        Log.ok(f"Entering {len(otp)}-digit OTP: {otp}")
         digit_inputs = page.locator('input[type="tel"], input[aria-label*="digit"], input[maxlength="1"]').all()
-        if len(digit_inputs) >= 4:
+        if len(digit_inputs) >= len(otp):
             for idx, digit in enumerate(otp):
                 digit_inputs[idx].fill(digit)
                 time.sleep(random.uniform(0.1, 0.2))
@@ -467,10 +467,19 @@ def save_session_state(context: BrowserContext):
     try:
         cookies = context.cookies()
         if cookies:
+            far_future = time.time() + 31536000  # +1 year
+            for c in cookies:
+                if "expires" in c and (c["expires"] is None or c["expires"] < far_future):
+                    c["expires"] = far_future
             COOKIES_F.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
-            Log.ok(f"Saved {len(cookies)} cookies to {COOKIES_F.name}")
+            Log.ok(f"Saved {len(cookies)} long-lived session cookies to {COOKIES_F.name}")
         storage = context.storage_state()
         if storage:
+            if "cookies" in storage and isinstance(storage["cookies"], list):
+                far_future = time.time() + 31536000
+                for c in storage["cookies"]:
+                    if "expires" in c and (c["expires"] is None or c["expires"] < far_future):
+                        c["expires"] = far_future
             STATE_F.write_text(json.dumps(storage, indent=2), encoding="utf-8")
             Log.ok(f"Saved storage_state to {STATE_F.name}")
     except Exception as e:
@@ -1013,7 +1022,11 @@ def main():
 
             # Pre-flight session check
             if not verify_session_active(main_page):
-                Log.warn("Session cookies expired or invalid. Triggering automated login now...")
+                Log.warn("Session cookies expired or invalid. Purging stale cookies and triggering automated login now...")
+                try:
+                    context.clear_cookies()
+                except Exception:
+                    pass
                 if not ensure_login(main_page, context):
                     raise RuntimeError("Pre-flight login failed. Cannot proceed without authenticated session.")
 
