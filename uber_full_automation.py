@@ -410,25 +410,38 @@ def get_current_sheet_state():
         if res.status_code == 200:
             df = pd.read_csv(io.StringIO(res.text))
             if not df.empty:
-                first_msg = str(df.iloc[0, 0])
+                first_msg  = str(df.iloc[0, 0])
+                first_from = str(df.iloc[0, 1]) if df.shape[1] >= 2 else ""
                 first_date = str(df.iloc[0, 2]) if df.shape[1] >= 3 else ""
                 match = re.search(r'\b(\d{4,6})\b', first_msg)
                 code = match.group(1) if match else None
-                return code, first_date, first_msg
+                # Flag if this looks like an Uber SMS (sender contains UBER)
+                is_uber = "uber" in first_from.lower() or "uber" in first_msg.lower()
+                return code, first_date, first_msg, is_uber
     except Exception as e:
         Log.warn(f"Sheet fetch note: {e}")
-    return None, None, ""
+    return None, None, "", False
 
 
 def poll_for_new_otp(initial_date, initial_code, timeout_seconds=90):
     Log.info(f"Waiting for new Uber OTP in Google Sheet (Timeout: {timeout_seconds}s)...")
     start = time.time()
     while time.time() - start < timeout_seconds:
-        code, d_str, msg = get_current_sheet_state()
+        code, d_str, msg, is_uber = get_current_sheet_state()
         if code and (code != initial_code or d_str != initial_date):
-            Log.ok(f"Retrieved new OTP from Google Sheet: {code} (at {d_str})")
-            return code
-        time.sleep(4)
+            # Prefer Uber-tagged messages; accept any new OTP code as fallback
+            if is_uber:
+                Log.ok(f"Retrieved Uber OTP from Google Sheet: {code} (from Uber SMS at {d_str})")
+                return code
+            else:
+                # Non-Uber SMS — keep polling, but save as fallback
+                Log.info(f"New code {code} seen but not from Uber (msg: {msg[:60]}...). Continuing to wait...")
+        time.sleep(1)  # Poll every 1 second — sheet only keeps 1 row, can't miss the window
+    # Last resort: return whatever code is in the sheet right now
+    code, d_str, msg, _ = get_current_sheet_state()
+    if code:
+        Log.warn(f"OTP timeout — using best available code from sheet: {code}")
+        return code
     return None
 
 
@@ -436,7 +449,7 @@ def handle_otp_input(page: Page, initial_sheet_date: str, initial_sheet_code: st
     Log.step("2FA", "2FA SMS OTP Verification Screen Detected")
     otp = poll_for_new_otp(initial_sheet_date, initial_sheet_code, timeout_seconds=90)
     if not otp:
-        otp, _, _ = get_current_sheet_state()
+        otp, _, _, _ = get_current_sheet_state()
 
     if otp and (len(otp) == 4 or len(otp) == 6):
         Log.ok(f"Entering {len(otp)}-digit OTP: {otp}")
@@ -488,7 +501,7 @@ def save_session_state(context: BrowserContext):
 
 def login_with_google(page: Page, context: BrowserContext) -> bool:
     Log.step("GOOGLE_AUTH", "Attempting Login via Google Account OAuth...")
-    init_code, init_date, _ = get_current_sheet_state()
+    init_code, init_date, _, _ = get_current_sheet_state()
     try:
         google_btn = page.locator('button:has-text("Continue with Google"), button:has-text("Google"), [data-testid*="google"]').first
         if google_btn.is_visible(timeout=5000):
@@ -536,7 +549,7 @@ def login_with_google(page: Page, context: BrowserContext) -> bool:
             Log.info("Google 2-Step Verification detected. Polling Google Sheet for OTP...")
             otp = poll_for_new_otp(init_date, init_code, timeout_seconds=90)
             if not otp:
-                otp, _, _ = get_current_sheet_state()
+                otp, _, _, _ = get_current_sheet_state()
             if otp:
                 Log.ok(f"Entering Google OTP: {otp}")
                 otp_input = page.locator('input#idvPin, input[type="tel"], input[name="Pin"]').first
@@ -584,7 +597,7 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
         except Exception:
             pass
 
-    init_code, init_date, _ = get_current_sheet_state()
+    init_code, init_date, _, _ = get_current_sheet_state()
 
     # 1. Check for 'Log in' or 'Sign in' buttons on landing page
     try:
