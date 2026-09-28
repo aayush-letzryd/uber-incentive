@@ -586,44 +586,50 @@ def login_with_google(page: Page, context: BrowserContext) -> bool:
 
         # 3. Google 2FA / Phone OTP (sent to 9900092015)
         try:
-            content = gp.content().lower()
-        except Exception:
-            content = ""
-        if any(w in content for w in ["verification code", "2-step", "enter code", "verify", "phone"]):
-            Log.info("Google 2-Step Verification detected. Polling Google Sheet for OTP...")
-            otp = poll_for_new_otp(init_date, init_code, timeout_seconds=90)
-            if not otp:
-                otp, _, _, _ = get_current_sheet_state()
-            if otp:
-                Log.ok(f"Entering Google 2FA OTP: {otp}")
-                otp_input = gp.locator('input#idvPin, input[type="tel"], input[name="Pin"], input[aria-label*="code"]').first
-                if otp_input.is_visible(timeout=4000):
-                    otp_input.fill(otp)
-                    time.sleep(0.5)
-                    next_btn = gp.locator('#idvPreregisteredPhoneNext button, button:has-text("Next")').first
-                    try:
-                        if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
-                            next_btn.click()
-                        else:
-                            gp.keyboard.press("Enter")
-                    except Exception:
-                        gp.keyboard.press("Enter")
-                    time.sleep(6)
+            if gp and not gp.is_closed():
+                content = gp.content().lower()
+                if any(w in content for w in ["verification code", "2-step", "enter code", "verify", "phone"]):
+                    Log.info("Google 2-Step Verification detected. Polling Google Sheet for OTP...")
+                    otp = poll_for_new_otp(init_date, init_code, timeout_seconds=90)
+                    if not otp:
+                        otp, _, _, _ = get_current_sheet_state()
+                    if otp and not gp.is_closed():
+                        Log.ok(f"Entering Google 2FA OTP: {otp}")
+                        otp_input = gp.locator('input#idvPin, input[type="tel"], input[name="Pin"], input[aria-label*="code"]').first
+                        if otp_input.is_visible(timeout=4000):
+                            otp_input.fill(otp)
+                            time.sleep(0.5)
+                            next_btn = gp.locator('#idvPreregisteredPhoneNext button, button:has-text("Next")').first
+                            try:
+                                if next_btn.is_visible() and next_btn.is_enabled(timeout=2000):
+                                    next_btn.click()
+                                else:
+                                    gp.keyboard.press("Enter")
+                            except Exception:
+                                gp.keyboard.press("Enter")
+                            time.sleep(6)
+            else:
+                Log.ok("Google popup finished and closed automatically!")
+        except Exception as e:
+            Log.info(f"Popup status check: {e}")
 
-        # 4. Wait for main page to land on supplier.uber.com after popup closes
-        Log.info("Waiting for supplier.uber.com after Google OAuth...")
-        for _ in range(20):
+        # 4. Wait for redirect back to supplier.uber.com / fleethub.uber.com
+        Log.info("Waiting for Uber portal after Google OAuth...")
+        for _ in range(25):
+            # If Uber shows "All set! ... Continue", click it
             try:
-                if "supplier.uber.com" in page.url and "auth.uber.com" not in page.url:
-                    Log.ok(f"🎉 Google OAuth Login successful! Landed on: {page.url}")
-                    save_session_state(context)
-                    return True
+                all_set = page.locator('button:has-text("Continue")').first
+                if all_set.is_visible(timeout=1000):
+                    Log.info("Clicking 'Continue' on 'All set!' screen...")
+                    all_set.click()
+                    time.sleep(3)
             except Exception:
                 pass
-            # Also check if popup itself landed on supplier.uber.com
+
             try:
-                if "supplier.uber.com" in gp.url:
-                    Log.ok(f"🎉 Google OAuth Login successful via popup! URL: {gp.url}")
+                current_urls = [p.url for p in context.pages]
+                if any(("supplier.uber.com" in u or "fleethub.uber.com" in u) and "auth.uber.com" not in u and "login" not in u for u in current_urls):
+                    Log.ok(f"🎉 Google OAuth Login successful! Landed on: {page.url}")
                     save_session_state(context)
                     return True
             except Exception:
@@ -640,24 +646,21 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
     dismiss_banner(page)
 
     # Bug 1 Fix: any valid supplier page (not just /orgs/) confirms active session
-    if "supplier.uber.com" in page.url and not is_login_required(page):
+    if ("supplier.uber.com" in page.url or "fleethub.uber.com" in page.url) and not is_login_required(page):
         Log.ok(f"Active session confirmed on {page.url}")
         save_session_state(context)
         return True
 
-    Log.step("AUTH", "Automated Uber Login Engine (Password / SMS OTP / Google OAuth)...")
+    Log.step("AUTH", "Automated Uber Login Engine (Direct Google OAuth / Password / SMS OTP)...")
 
     # Only navigate to login page if currently on an auth/login page or unknown page.
-    # Do NOT navigate away from a valid supplier page — that would drop the session.
-    if not is_login_required(page) and "supplier.uber.com" not in page.url:
+    if not is_login_required(page) and "supplier.uber.com" not in page.url and "fleethub.uber.com" not in page.url:
         try:
             page.goto("https://supplier.uber.com/login", timeout=30000, wait_until="domcontentloaded")
             time.sleep(4)
             dismiss_banner(page)
         except Exception:
             pass
-
-    init_code, init_date, _, _ = get_current_sheet_state()
 
     # 1. Check for 'Log in' or 'Sign in' buttons on landing page
     try:
@@ -668,7 +671,26 @@ def ensure_login(page: Page, context: BrowserContext) -> bool:
     except Exception:
         pass
 
-    # Strategy 1: Standard Uber Email + Password / SMS OTP
+    # =========================================================================
+    # STRATEGY 1 (PRIMARY): DIRECT GOOGLE OAUTH LOGIN
+    # =========================================================================
+    # Uber provides 'Continue with Google' directly on the main landing screen.
+    # This bypasses Uber's phone/SMS OTP flow, CAPTCHA overlays, and device challenges.
+    Log.info("==> Strategy 1 (Primary): Direct Google OAuth Login...")
+    try:
+        if login_with_google(page, context):
+            Log.ok("🎉 Strategy 1 (Direct Google OAuth) succeeded!")
+            return True
+    except Exception as e:
+        Log.warn(f"Strategy 1 note: {e}")
+
+    Log.warn("Strategy 1 did not complete. Falling back to Strategy 2 (Email + Password / SMS OTP)...")
+
+    # =========================================================================
+    # STRATEGY 2 (FALLBACK): STANDARD EMAIL + PASSWORD / SMS OTP
+    # =========================================================================
+    init_code, init_date, _, _ = get_current_sheet_state()
+
     try:
         email_input = page.locator('input[type="text"], input[type="email"], input#PHONE_NUMBER_OR_EMAIL_ADDRESS, input[name="textValue"]').first
         if email_input.is_visible(timeout=5000):
